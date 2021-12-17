@@ -19,7 +19,7 @@ from typing import (
 )
 
 from qtpy.QtCore import QEvent, QEventLoop, QPoint, QProcess, QSize, Qt, Slot
-from qtpy.QtGui import QIcon
+from qtpy.QtGui import QIcon, QScreen
 from qtpy.QtWidgets import (
     QApplication,
     QDialog,
@@ -169,7 +169,9 @@ class _QtMainWindow(QMainWindow):
             window_position = (self.x(), self.y())
         else:
             width, height = window_position
-            screen_geo = QApplication.desktop().geometry()
+            screen_geo = QScreen.availableGeometry(
+                QApplication.primaryScreen()
+            )
             if screen_geo.width() < width or screen_geo.height() < height:
                 window_position = (self.x(), self.y())
 
