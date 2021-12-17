@@ -264,6 +264,8 @@ def compile_qrc(qrc) -> bytes:
         return _compile_qrc_pyqt5(qrc).replace(b'PyQt5', b'qtpy')
     elif qtpy.API_NAME == 'PySide2':
         return _compile_qrc_pyside2(qrc).replace(b'PySide2', b'qtpy')
+    elif qtpy.API_NAME == 'PySide6':
+        return _compile_qrc_pyside6(qrc).replace(b'PySide6', b'qtpy')
     else:
         raise RuntimeError(
             f"Cannot compile QRC. Unexpected qtpy API name: {qtpy.API_NAME}"
