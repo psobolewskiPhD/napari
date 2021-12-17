@@ -223,6 +223,41 @@ def _compile_qrc_pyside2(qrc) -> bytes:
         raise RuntimeError(f"Failed to build PySide2 resources {e}")
 
 
+def _compile_qrc_pyside6(qrc) -> bytes:
+    """Compile qrc file using the PySide2 method.
+
+    PySide compiles qrc files using the rcc binary in the root directory, (same
+    path as PySide2.__init__)
+    """
+    from subprocess import CalledProcessError, run
+
+    import PySide6
+
+    pyside6_rcc = (
+        Path(PySide6.__file__).parent.parent.parent.parent.parent / "bin"
+    )
+
+    if os.name == 'nt':
+        look_for = ('rcc.exe', 'pyside2-rcc.exe')
+    else:
+        look_for = ('rcc', 'pyside6-rcc')
+
+    for bin in look_for:
+        if (pyside6_rcc / bin).exists():
+            cmd = [str(pyside6_rcc / bin)]
+            if 'pyside6' not in bin:
+                # the newer pure rcc version requires this for python
+                cmd.extend(['-g', 'python'])
+            break
+    else:
+        raise RuntimeError(f"PySide6 rcc binary not found in {pyside6_rcc}")
+
+    try:
+        return run(cmd + [qrc], check=True, capture_output=True).stdout
+    except CalledProcessError as e:
+        raise RuntimeError(f"Failed to build PySide2 resources {e}")
+
+
 def compile_qrc(qrc) -> bytes:
     """Compile a qrc file into a resources.py bytes"""
     if qtpy.API_NAME == 'PyQt5':
