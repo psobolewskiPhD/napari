@@ -102,7 +102,7 @@ class LayerDelegate(QStyledItemDelegate):
         except ValueError:
             return
         # guessing theme rather than passing it through.
-        bg = option.palette.color(option.palette.Background).red()
+        bg = option.palette.color(option.palette.Window).red()
         option.icon = icon.colored(theme='dark' if bg < 128 else 'light')
         option.decorationSize = QSize(18, 18)
         option.decorationPosition = option.Right  # put icon on the right
