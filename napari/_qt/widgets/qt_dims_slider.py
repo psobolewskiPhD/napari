@@ -171,7 +171,7 @@ class QtDimSliderWidget(QWidget):
         self.play_button.setToolTip(
             trans._('Right click on button for playback setting options.')
         )
-        self.play_button.mode_combo.activated[str].connect(
+        self.play_button.mode_combo.activated[int].connect(
             lambda x: self.__class__.loop_mode.fset(
                 self, LoopMode(x.replace(' ', '_'))
             )
