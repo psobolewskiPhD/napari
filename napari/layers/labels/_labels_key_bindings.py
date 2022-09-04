@@ -84,10 +84,29 @@ def decrease_label_id(layer: Labels):
 
 
 @register_label_action(
-    trans._("Increase the currently selected label by one."),
+    trans._("Increase brush size"),
+)
+def increase_brush_size(layer: Labels):
+    layer.brush_size += 1
+
+
+@register_label_action(
+    trans._("Decrease brush size"),
+)
+def decrease_brush_size(layer: Labels):
+    layer.brush_size -= 1
+
+
+@register_label_action(
+    trans._("Increase the size of the brush"),
 )
 def increase_label_id(layer: Labels):
     layer.selected_label += 1
+
+
+@register_label_mode_action(trans._("Toggle preserve labels"))
+def toggle_preserve_labels(layer: Labels):
+    layer.preserve_labels = not layer.preserve_labels
 
 
 @Labels.bind_key('Control-Z')
@@ -100,3 +119,40 @@ def undo(layer: Labels):
 def redo(layer: Labels):
     """Redo any previously undone actions."""
     layer.redo()
+
+
+# the following are toggles, where the key temporarily
+# triggers a change in behavior, then returns to the previous state
+@Labels.bind_key('Shift')
+def preserve_labels(layer: Labels):
+    """Toggle preserve label option when held."""
+    # on key press
+    layer.preserve_labels = not layer.preserve_labels
+    yield
+
+    # on key release
+    layer.preserve_labels = not layer.preserve_labels
+
+
+@Labels.bind_key('Control')
+@Labels.bind_key('F')  # this is common in other software
+def switch_fill(layer):
+    """Switch to fill mode temporarily when held."""
+    previous_mode = layer.mode
+    # on key press
+    layer.mode = Mode.FILL
+    yield
+    # on key release
+    layer.mode = previous_mode
+
+
+@Labels.bind_key('Alt')
+@Labels.bind_key('`')  # this is the Photoshop default
+def switch_erase(layer):
+    """Switch to erase mode temporarily when held."""
+    previous_mode = layer.mode
+    # on key press
+    layer.mode = Mode.ERASE
+    yield
+    # on key release
+    layer.mode = previous_mode
