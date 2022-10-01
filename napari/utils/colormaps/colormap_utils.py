@@ -384,11 +384,14 @@ def label_colormap(num_colors=256, seed=0.5):
     """
     # Starting the control points slightly above 0 and below 1 is necessary
     # to ensure that the background pixel 0 is transparent
-    midpoints = np.linspace(0.00001, 1 - 0.00001, num_colors - 1)
+    midpoints = np.linspace(0.00001, 1 - 0.00001, num_colors)
     control_points = np.concatenate(([0], midpoints, [1.0]))
     # make sure to add an alpha channel to the colors
     colors = np.concatenate(
-        (_color_random(num_colors, seed=seed), np.full((num_colors, 1), 1)),
+        (
+            _color_random(num_colors + 1, seed=seed),
+            np.full((num_colors + 1, 1), 1),
+        ),
         axis=1,
     )
     colors[0, :] = 0  # ensure alpha is 0 for label 0
