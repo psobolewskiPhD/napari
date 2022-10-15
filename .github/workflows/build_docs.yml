@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           path: docs  # place in a named directory
-          repository: napari/docs
+          repository: psobolewski/napari-docs
 
       - name: Clone main repo
         uses: actions/checkout@v3
