@@ -111,7 +111,7 @@ QtConsole {
 
 QtConsole > QTextEdit {
   background-color: {{ console }};
-  background-clip: padding;
+  background-clip: margin;
   color: {{ text }};
   selection-background-color: {{ highlight }};
   margin: 10px;
@@ -158,6 +158,7 @@ QtDivider[selected=false] {
 QtLayerWidget {
   padding: 0px;
   background-color: {{ foreground }};
+  margin: 10px;
   border-radius: 2px;
   min-height: 32px;
   max-height: 32px;
