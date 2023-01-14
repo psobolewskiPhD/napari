@@ -531,6 +531,7 @@ def test_leaks_image(qtbot, make_napari_viewer):
     assert not dr()
 
 
+@skip_on_win_ci
 @skip_local_popups
 def test_leaks_labels(qtbot, make_napari_viewer):
     viewer = make_napari_viewer(show=True)
@@ -647,7 +648,6 @@ def test_qt_viewer_multscale_image_out_of_view(make_napari_viewer):
     viewer.add_image([np.eye(1024), np.eye(512), np.eye(256)])
 
 
-@skip_on_win_ci
 def test_surface_mixed_dim(make_napari_viewer):
     """Test that adding a layer that changes the world ndim
     when ndisplay=3 before the mouse cursor has been updated
