@@ -646,6 +646,7 @@ def test_qt_viewer_multscale_image_out_of_view(make_napari_viewer):
     viewer.add_image([np.eye(1024), np.eye(512), np.eye(256)])
 
 
+@skip_on_win_ci
 def test_surface_mixed_dim(make_napari_viewer):
     """Test that adding a layer that changes the world ndim
     when ndisplay=3 before the mouse cursor has been updated
@@ -666,7 +667,6 @@ def test_surface_mixed_dim(make_napari_viewer):
     viewer.add_surface(timeseries_data)
 
 
-@skip_on_win_ci
 def test_insert_layer_ordering(make_napari_viewer):
     """make sure layer ordering is correct in vispy when inserting layers"""
     viewer = make_napari_viewer()
