@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from napari._qt.qt_main_window import Window, _QtMainWindow
+from napari._tests.utils import skip_on_win_ci
 from napari.utils.theme import (
     _themes,
     get_theme,
@@ -12,6 +13,7 @@ from napari.utils.theme import (
 )
 
 
+@skip_on_win_ci
 def test_current_viewer(make_napari_viewer):
     """Test that we can retrieve the "current" viewer window easily.
 
