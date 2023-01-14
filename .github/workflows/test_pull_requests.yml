@@ -55,11 +55,11 @@ jobs:
         python: ["3.8", "3.9", "3.10"]
         backend: [pyqt5, pyside2]
         include:
-          # Windows py38
-          - python: 3.8
+          # Windows py39
+          - python: 3.9
             platform: windows-latest
             backend: pyqt5
-          - python: 3.8
+          - python: 3.9
             platform: windows-latest
             backend: pyside2
           - python: 3.9
