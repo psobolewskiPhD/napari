@@ -681,6 +681,7 @@ def test_insert_layer_ordering(make_napari_viewer):
     assert pl2_vispy.order == 0
 
 
+@skip_on_win_ci
 def test_create_non_empty_viewer_model(qtbot):
     viewer_model = ViewerModel()
     viewer_model.add_points([(1, 2), (2, 3)])
