@@ -666,6 +666,7 @@ def test_surface_mixed_dim(make_napari_viewer):
     viewer.add_surface(timeseries_data)
 
 
+@skip_on_win_ci
 def test_insert_layer_ordering(make_napari_viewer):
     """make sure layer ordering is correct in vispy when inserting layers"""
     viewer = make_napari_viewer()
@@ -681,7 +682,6 @@ def test_insert_layer_ordering(make_napari_viewer):
     assert pl2_vispy.order == 0
 
 
-@skip_on_win_ci
 def test_create_non_empty_viewer_model(qtbot):
     viewer_model = ViewerModel()
     viewer_model.add_points([(1, 2), (2, 3)])
