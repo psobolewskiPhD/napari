@@ -515,7 +515,7 @@ def test_memory_leaking(qtbot, make_napari_viewer):
     assert labels() is None
 
 
-@skip_on_win_ci  # alone not sufficient
+# @skip_on_win_ci  # alone not sufficient
 @skip_local_popups
 def test_leaks_image(qtbot, make_napari_viewer):
 
@@ -531,7 +531,7 @@ def test_leaks_image(qtbot, make_napari_viewer):
     assert not dr()
 
 
-@skip_on_win_ci  # alone not sufficient
+# @skip_on_win_ci  # alone not sufficient
 @skip_local_popups
 def test_leaks_labels(qtbot, make_napari_viewer):
     viewer = make_napari_viewer(show=True)
@@ -625,7 +625,7 @@ def test_remove_add_image_3D(make_napari_viewer):
     viewer.layers.append(layer)
 
 
-@skip_on_win_ci  # sufficient for pyqt5, but also needed for pyside2
+# @skip_on_win_ci  # sufficient for pyqt5, but also needed for pyside2
 @skip_local_popups
 def test_qt_viewer_multscale_image_out_of_view(make_napari_viewer):
     """Test out-of-view multiscale image viewing fix.
