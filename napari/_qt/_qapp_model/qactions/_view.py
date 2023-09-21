@@ -54,6 +54,8 @@ Q_VIEW_ACTIONS: List[Action] = [
         ],
         callback=Window._toggle_fullscreen,
         keybindings=[StandardKeyBinding.FullScreen],
+        # on macOS there is a native Full Screen menu item
+        enablement=sys.platform != 'darwin',
         toggled=ToggleRule(get_current=_get_current_fullscreen_status),
     ),
     Action(
