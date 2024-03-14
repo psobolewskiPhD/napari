@@ -56,10 +56,10 @@ if API_NAME == 'PySide6' and sys.version_info[:2] < (3, 10):
 
     assert isinstance(QT_VERSION, str)
 
-    if version.parse(QT_VERSION) > version.parse('6.3.1'):
+    if version.parse(QT_VERSION) > version.parse('6.5.0'):
         raise RuntimeError(
             trans._(
-                'Napari is not expected to work with PySide6 >= 6.3.2 on Python < 3.10',
+                'Napari is not expected to work with PySide6 >= 6.5.0 on Python < 3.10',
                 deferred=True,
             )
         )
