@@ -250,6 +250,7 @@ class Image(IntensityVisualizationMixin, ScalarFieldBase):
         shear=None,
         translate=None,
         visible=True,
+        sequence=False,
     ):
         # Determine if rgb
         data_shape = data.shape if hasattr(data, 'shape') else data[0].shape
@@ -287,6 +288,7 @@ class Image(IntensityVisualizationMixin, ScalarFieldBase):
             visible=visible,
         )
 
+        self._sequence = sequence
         self.rgb = rgb
         self._colormap = ensure_colormap(colormap)
         self._gamma = gamma

@@ -633,9 +633,10 @@ class ViewerModel(KeymapProvider, MousemapProvider, EventedModel):
         self._update_layers(layers=[layer])
 
         if len(self.layers) == 1:
-            # set dims slider to the middle of all dimensions
             self.reset_view()
-            self.dims._go_to_center_step()
+            # set dims slider to the middle of all dimensions
+            if not self.layers[-1]._sequence:
+                self.dims._go_to_center_step()
 
     @staticmethod
     def _layer_help_from_mode(layer: Layer):
@@ -760,6 +761,7 @@ class ViewerModel(KeymapProvider, MousemapProvider, EventedModel):
         shear=None,
         translate=None,
         visible=True,
+        sequence=False,
     ) -> Union[Image, List[Image]]:
         """Add one or more Image layers to the layer list.
 
@@ -920,6 +922,7 @@ class ViewerModel(KeymapProvider, MousemapProvider, EventedModel):
             'experimental_clipping_planes': experimental_clipping_planes,
             'custom_interpolation_kernel_2d': custom_interpolation_kernel_2d,
             'projection_mode': projection_mode,
+            'sequence': sequence,
         }
 
         # these arguments are *already* iterables in the single-channel case.
