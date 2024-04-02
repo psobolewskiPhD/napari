@@ -2976,9 +2976,7 @@
     "napari/utils/notebook_display.py": [
       "data:image/png;base64,",
       "utf-8",
-      "<img src=\"{url}\" alt=\"{_alt}\"></img>",
-      "The lxml library is not installed, and is required to sanitize alt text for napari screenshots. Alt-text will be stripped altogether without lxml.",
-      "The provided alt text does not constitute valid html, so it was discarded."
+      "<img src=\"{url}\" alt=\"{_alt}\"></img>"
     ],
     "napari/utils/notifications.py": [
       "1",

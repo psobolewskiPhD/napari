@@ -37,10 +37,10 @@ def test_nbscreenshot(make_napari_viewer):
         ('Good alt text', 'Good alt text'),
         # Naughty strings https://github.com/minimaxir/big-list-of-naughty-strings
         # ASCII punctuation
-        (r",./;'[]\-=", ',./;&#x27;[]\\-='),
+        (r",./;'[]\-=", ",./;'[]\\-="),
         # ASCII punctuation 2, skipping < because that is interpreted as the start
         # of an HTML element.
-        ('>?:"{}|_+', '&gt;?:&quot;{}|_+'),
+        ('>?:"{}|_+', '&gt;?:"{}|_+'),
         ('!@#$%^&*()`~', '!@#$%^&amp;*()`~'),  # ASCII punctuation 3
         # # Emojis
         ('😍', '😍'),  # emoji 1
@@ -70,16 +70,16 @@ def test_safe_alt_text(alt_text_input, expected_alt_text):
     if not expected_alt_text:
         assert not display_obj.alt_text
     else:
-        assert html.escape(display_obj.alt_text) == expected_alt_text
+        # pytest escapes strings by default, including quotes
+        # nh3.clean does not escape quotes
+        assert html.unescape(display_obj.alt_text) == html.unescape(
+            expected_alt_text
+        )
 
 
 def test_invalid_alt_text():
-    with pytest.warns(UserWarning):
-        # because string with only whitespace messes up with the parser
-        display_obj = nbscreenshot(Mock(), alt_text=' ')
+    display_obj = nbscreenshot(Mock(), alt_text=' ')
     assert display_obj.alt_text is None
 
-    with pytest.warns(UserWarning):
-        # because string with only whitespace messes up with the parser
-        display_obj = nbscreenshot(Mock(), alt_text='')
+    display_obj = nbscreenshot(Mock(), alt_text='')
     assert display_obj.alt_text is None
