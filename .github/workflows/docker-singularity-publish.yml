@@ -104,8 +104,8 @@ jobs:
     needs: build1
     runs-on: ubuntu-latest
     container:
-      image: quay.io/singularity/docker2singularity:v4.1.0
-      options: --privileged
+      # Apptainer is now the official Singularity project
+      image: ghcr.io/apptainer/apptainer:1.3.3
     permissions:
       contents: read
       packages: write
@@ -131,7 +131,7 @@ jobs:
         run: |
           ls
           if [ -f "${{ matrix.recipe }}" ]; then
-             singularity build container.sif ${{ matrix.recipe }}
+             apptainer build container.sif ${{ matrix.recipe }}
              tag=latest
           fi
           # Build the container and name by tag
