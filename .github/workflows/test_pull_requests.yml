@@ -86,13 +86,13 @@ jobs:
         include:
           - python: 3.9
             platform: ubuntu-latest
-            backend: pyqt5
-            pydantic: "_pydantic_1"
+            backend: pyside2
+            pydantic: ""
             coverage: no_cov
             min_req: ""
-          - python: 3.12
+          - python: 3.9
             platform: ubuntu-latest
-            backend: pyqt6
+            backend: pyside6
             pydantic: ""
             coverage: no_cov
             min_req: ""
