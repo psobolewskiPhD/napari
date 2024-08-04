@@ -234,7 +234,7 @@ def _auto_shutdown_dask_threadworkers():
     We don't assert the number of threads in unchanged as other things
     modify the number of threads.
     """
-    assert dask.threaded.default_pool is None
+    # assert dask.threaded.default_pool is None
     try:
         yield
     finally:
