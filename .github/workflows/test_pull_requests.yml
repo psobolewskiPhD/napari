@@ -84,15 +84,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python: 3.9
+          - python: 3.10
             platform: ubuntu-latest
-            backend: pyqt5
-            pydantic: "_pydantic_1"
+            backend: pyside2
+            pydantic: ""
             coverage: no_cov
             min_req: ""
-          - python: 3.12
+          - python: 3.11
             platform: ubuntu-latest
-            backend: pyqt6
+            backend: pyside6
             pydantic: ""
             coverage: no_cov
             min_req: ""
