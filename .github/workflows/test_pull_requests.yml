@@ -84,7 +84,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python: 3.11
+          - python: 3.9
             platform: ubuntu-latest
             backend: pyside2
             pydantic: ""
