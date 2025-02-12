@@ -154,6 +154,11 @@ class PreferencesDialog(QDialog):
                         )
                     )
 
+        # Set the step size for the grid_spacing widget
+        grid_spacing_widget = form.widget.widgets.get('grid_spacing')
+        if grid_spacing_widget:
+            grid_spacing_widget.setSingleStep(0.05)
+
         page_scrollarea = QScrollArea()
         page_scrollarea.setWidgetResizable(True)
         page_scrollarea.setWidget(form)
