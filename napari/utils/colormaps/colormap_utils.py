@@ -739,6 +739,20 @@ def _increment_unnamed_colormap(
     return name, display_name
 
 
+def _match_colors_to_available_colormap(custom_cmap: Colormap) -> Colormap:
+    """Helper function to match custom colormap colors to an existing colormap."""
+    for available_cmap in AVAILABLE_COLORMAPS.values():
+        if (
+            np.array_equal(available_cmap.controls, custom_cmap.controls)
+            and np.array_equal(available_cmap.colors, custom_cmap.colors)
+            and available_cmap.interpolation == custom_cmap.interpolation
+        ):
+            custom_cmap = available_cmap
+            break
+
+    return custom_cmap
+
+
 def ensure_colormap(colormap: ValidColormapArg) -> Colormap:
     """Accept any valid colormap argument, and return Colormap, or raise.
 
@@ -788,14 +802,7 @@ def ensure_colormap(colormap: ValidColormapArg) -> Colormap:
                 if custom_cmap is None:
                     custom_cmap = vispy_or_mpl_colormap(colormap)
 
-                for cmap_ in AVAILABLE_COLORMAPS.values():
-                    if (
-                        np.array_equal(cmap_.controls, custom_cmap.controls)
-                        and np.array_equal(cmap_.colors, custom_cmap.colors)
-                        and cmap_.interpolation == custom_cmap.interpolation
-                    ):
-                        custom_cmap = cmap_
-                        break
+                custom_cmap = _match_colors_to_available_colormap(custom_cmap)
 
             name = custom_cmap.name
             AVAILABLE_COLORMAPS[name] = custom_cmap
