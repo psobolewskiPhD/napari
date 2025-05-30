@@ -26,6 +26,7 @@ from napari.components._layer_slicer import _LayerSlicer
 from napari.components._viewer_mouse_bindings import (
     dims_scroll,
     double_click_to_zoom,
+    layers_scroll,
 )
 from napari.components.camera import Camera
 from napari.components.cursor import Cursor, CursorStyle
@@ -204,6 +205,7 @@ class ViewerModel(KeymapProvider, MousemapProvider, EventedModel):
     # Need to use default factory because slicer is not copyable which
     # is required for default values.
     _layer_slicer: _LayerSlicer = PrivateAttr(default_factory=_LayerSlicer)
+    _layer_list_scroll_progress: int = 0
 
     def __init__(
         self, title='napari', ndisplay=2, order=(), axis_labels=()
@@ -289,6 +291,7 @@ class ViewerModel(KeymapProvider, MousemapProvider, EventedModel):
 
         # Add mouse callback
         self.mouse_wheel_callbacks.append(dims_scroll)
+        self.mouse_wheel_callbacks.append(layers_scroll)
         self.mouse_double_click_callbacks.append(double_click_to_zoom)
 
         self._overlays.update({k: v() for k, v in DEFAULT_OVERLAYS.items()})
