@@ -243,10 +243,21 @@ def _auto_shutdown_dask_threadworkers():
     """
     This automatically shutdown dask thread workers.
 
-    We don't assert the number of threads in unchanged as other things
+    When using pytest-xdist, pools may persist between tests in worker processes,
+    so we clean up any existing pools before starting each test.
+
+    We don't assert the number of threads is unchanged as other things
     modify the number of threads.
     """
-    assert dask.threaded.default_pool is None
+    # Clean up any existing pool before starting the test
+    # When using pytest-xdist, pools may persist between tests
+    if dask.threaded.default_pool is not None:
+        if isinstance(dask.threaded.default_pool, ThreadPool):
+            dask.threaded.default_pool.close()
+            dask.threaded.default_pool.join()
+        elif dask.threaded.default_pool:
+            dask.threaded.default_pool.shutdown()
+        dask.threaded.default_pool = None
     try:
         yield
     finally:
