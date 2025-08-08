@@ -77,9 +77,7 @@ def test_add_layer(
 
 
 def test_new_labels(qt_viewer: QtViewer, viewer_model: ViewerModel) -> None:
-    """Test adding new labels layer."""
-    # Add labels to empty viewer
-
+    """Test adding new labels layer to empty viewer."""
     viewer_model._new_labels()
     assert np.max(viewer_model.layers[0].data) == 0
     assert len(viewer_model.layers) == 1
@@ -87,15 +85,14 @@ def test_new_labels(qt_viewer: QtViewer, viewer_model: ViewerModel) -> None:
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_new_labels_to_image(
     qt_viewer: QtViewer, viewer_model: ViewerModel
 ) -> None:
-    # Add labels with image already present
-    rng = np.random.default_rng(0)
-    data = rng.random((10, 15))
+    """Test adding new labels layer to viewer with image."""
+    data = np.random.default_rng(0).random((10, 15))
     viewer_model.add_image(data)
     viewer_model._new_labels()
     assert np.max(viewer_model.layers[1].data) == 0
@@ -104,12 +101,11 @@ def test_new_labels_to_image(
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_new_points(qt_viewer: QtViewer, viewer_model: ViewerModel) -> None:
-    """Test adding new points layer."""
-    # Add labels to empty viewer
+    """Test adding a new points layer to empty viewer."""
     viewer_model.add_points()
     assert len(viewer_model.layers[0].data) == 0
     assert len(viewer_model.layers) == 1
@@ -117,15 +113,14 @@ def test_new_points(qt_viewer: QtViewer, viewer_model: ViewerModel) -> None:
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_new_points_to_image(
     qt_viewer: QtViewer, viewer_model: ViewerModel
 ) -> None:
-    # Add points with image already present
-    rng = np.random.default_rng(0)
-    data = rng.random((10, 15))
+    """Test adding new points layer to viewer with image."""
+    data = np.random.default_rng(0).random((10, 15))
     viewer_model.add_image(data)
     viewer_model.add_points()
     assert len(viewer_model.layers[1].data) == 0
@@ -134,14 +129,13 @@ def test_new_points_to_image(
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_new_shapes_empty_viewer(
     qt_viewer: QtViewer, viewer_model: ViewerModel
 ) -> None:
-    """Test adding new shapes layer."""
-    # Add labels to empty viewer
+    """Test adding new shapes layer to empty viewer."""
     viewer_model.add_shapes()
     assert len(viewer_model.layers[0].data) == 0
     assert len(viewer_model.layers) == 1
@@ -149,15 +143,14 @@ def test_new_shapes_empty_viewer(
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_new_shapes_to_image(
     qt_viewer: QtViewer, viewer_model: ViewerModel
 ) -> None:
-    # Add points with image already present
-    rng = np.random.default_rng(0)
-    data = rng.random((10, 15))
+    """Test adding new shapes layer to viewer with image."""
+    data = np.random.default_rng(0).random((10, 15))
     viewer_model.add_image(data)
     viewer_model.add_shapes()
     assert len(viewer_model.layers[1].data) == 0
@@ -166,7 +159,7 @@ def test_new_shapes_to_image(
 
     assert viewer_model.dims.ndim == 2
     assert qt_viewer.dims.nsliders == viewer_model.dims.ndim
-    assert np.sum(qt_viewer.dims._displayed_sliders) == 0
+    npt.assert_array_equal(qt_viewer.dims._displayed_sliders, False)
 
 
 def test_z_order_adding_removing_images(
@@ -220,7 +213,6 @@ def test_export_figure(
     tmp_path: Path,
     qtbot: QtBot,
 ) -> None:
-    np.random.seed(0)
     # Add image
     data = np.ones((250, 250))
     layer = viewer_model.add_image(data)
@@ -255,12 +247,12 @@ def test_export_figure_3d(
     tmp_path: Path,
     qtbot: QtBot,
 ) -> None:
-    np.random.seed(0)
+    rng = np.random.default_rng(0)
     # Add image, keep values low to contrast with white background
     viewer_model.dims.ndisplay = 3
     viewer_model.theme = 'light'
 
-    data = np.random.randint(50, 100, size=(10, 250, 250), dtype=np.uint8)
+    data = rng.integers(50, 100, size=(10, 250, 250), dtype=np.uint8)
     layer = viewer_model.add_image(data)
 
     # check the non-rotated data (angles = 0,0,90) are exported without any
@@ -341,9 +333,19 @@ def test_export_rois(
     assert viewer_model.camera.zoom == camera_zoom
 
     test_dir = tmp_path / 'test_dir'
-    qt_viewer.export_rois(roi_shapes_data, paths=test_dir)
-    QApplication.processEvents()
-    qtbot.wait(1000)
+    refs = []
+    import gc
+
+    try:
+        res = qt_viewer.export_rois(roi_shapes_data, paths=test_dir)
+        refs.append(res)
+        gc.collect()
+        QApplication.processEvents()
+        qtbot.wait(1000)
+    finally:
+        res.clear()
+        gc.collect()
+
     assert all(
         (test_dir / f'roi_{i}.png').exists()
         for i in range(len(roi_shapes_data))
@@ -391,25 +393,25 @@ def test_screenshot_dialog(
     viewer_model: ViewerModel, qt_viewer: QtViewer, tmp_path: Path
 ) -> None:
     """Test save screenshot functionality."""
-    np.random.seed(0)
+    rng = np.random.default_rng(0)
     # Add image
-    data = np.random.random((10, 15))
+    data = rng.random((10, 15))
     viewer_model.add_image(data)
 
     # Add labels
-    data = np.random.randint(20, size=(10, 15))
+    data = rng.integers(20, size=(10, 15))
     viewer_model.add_labels(data)
 
     # Add points
-    data = 20 * np.random.random((10, 2))
+    data = 20 * rng.random((10, 2))
     viewer_model.add_points(data)
 
     # Add vectors
-    data = 20 * np.random.random((10, 2, 2))
+    data = 20 * rng.random((10, 2, 2))
     viewer_model.add_vectors(data)
 
     # Add shapes
-    data = 20 * np.random.random((10, 4, 2))
+    data = 20 * rng.random((10, 4, 2))
     viewer_model.add_shapes(data)
 
     # Save screenshot
@@ -555,7 +557,7 @@ def test_remove_labels(viewer_model: ViewerModel) -> None:
     viewer_model.add_labels(rng.integers(0, 10, size=(10, 10), dtype=np.int8))
 
 
-@pytest.mark.xfail(
+@pytest.mark.skip(
     reason='Broadcasting layers is broken by reordering dims, see #3882'
 )
 @pytest.mark.parametrize('multiscale', [False, True])
@@ -708,9 +710,7 @@ def test_label_colors_matching_widget_auto(
 ) -> None:
     """Make sure the rendered label colors match the QtColorBox widget."""
 
-    # XXX TODO: this unstable! Seed = 0 fails, for example. This is due to numerical
-    #           imprecision in random colormap on gpu vs cpu
-    np.random.seed(1)
+    rng = np.random.default_rng(0)
     data = np.ones((2, 2), dtype=dtype)
     layer = qt_viewer_with_controls.viewer.add_labels(data)
     layer.show_selected_label = use_selection
@@ -721,7 +721,7 @@ def test_label_colors_matching_widget_auto(
         (
             np.arange(1, 10, dtype=dtype),
             [n_c - 1, n_c, n_c + 1],
-            np.random.randint(
+            rng.integers(
                 1, min(2**20, np.iinfo(dtype).max), size=20, dtype=dtype
             ),
             [-1, -2, -10],
@@ -1196,7 +1196,7 @@ def test_viewer_drag_to_zoom(
     viewer_model._zoom_box.events.zoom.connect(zoom_callback)
 
     # Add an image layer
-    data = np.random.random((10, 20))
+    data = np.random.default_rng(0).random((10, 20))
     viewer_model.add_image(data)
 
     assert viewer_model._zoom_box.visible is False, (
@@ -1245,9 +1245,6 @@ def test_viewer_drag_to_zoom_with_cancel(
     """Test drag to zoom mouse binding."""
     canvas = qt_viewer.canvas
 
-    if os.getenv('CI'):
-        qt_viewer.show()
-
     def zoom_callback(event):
         """Mock zoom callback to check zoom box visibility."""
         data_positions = event.value
@@ -1258,7 +1255,7 @@ def test_viewer_drag_to_zoom_with_cancel(
     viewer_model._zoom_box.events.zoom.connect(zoom_callback)
 
     # Add an image layer
-    data = np.random.random((10, 20))
+    data = np.random.default_rng(0).random((10, 20))
     viewer_model.add_image(data)
 
     assert viewer_model._zoom_box.visible is False, (
