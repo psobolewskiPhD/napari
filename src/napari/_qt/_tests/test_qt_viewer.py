@@ -337,6 +337,7 @@ def test_export_rois(
     import gc
 
     try:
+        qtbot.wait(1000)
         res = qt_viewer.export_rois(roi_shapes_data, paths=test_dir)
         refs.append(res)
         gc.collect()
@@ -1202,6 +1203,7 @@ def test_viewer_drag_to_zoom(
     assert viewer_model._zoom_box.visible is False, (
         'Zoom box should be hidden initially'
     )
+    qtbot.wait(10)
     # Simulate press to start zooming
     canvas._scene_canvas.events.mouse_press(
         pos=(0, 0), modifiers=('Alt',), button=0
