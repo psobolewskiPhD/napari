@@ -28,7 +28,7 @@ def _get_provider_actions(type_):
                 superclass
             ).values()
         )
-    return actions
+    return sorted(actions, key=lambda action: action.__name__)
 
 
 def _assert_shortcuts_exist_for_each_action(type_):
@@ -43,7 +43,7 @@ def _assert_shortcuts_exist_for_each_action(type_):
         )
 
 
-viewer_actions = sorted(_get_provider_actions(Viewer), key=lambda action: action.name)
+viewer_actions = _get_provider_actions(Viewer)
 
 
 def test_all_viewer_actions_are_accessible_via_shortcut(make_napari_viewer):
