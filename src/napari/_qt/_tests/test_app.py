@@ -38,6 +38,11 @@ def test_windows_grouping_overwrite(qapp):
 
 def test_run_outside_ipython(make_napari_viewer, qapp, monkeypatch):
     """Test that we don't incorrectly give ipython the event loop."""
+    # Mock the IPython module to avoid side effects from other tests
+    # when running with pytest-xdist
+    import sys
+    monkeypatch.setitem(sys.modules, 'IPython', None)
+
     assert not _ipython_has_eventloop()
     v1 = make_napari_viewer()
     assert not _ipython_has_eventloop()
