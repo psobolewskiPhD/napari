@@ -1687,7 +1687,7 @@ class ShapeList:
     def outlines(
         self, indices: Sequence[int]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Finds outlines of shapes listed in indices
+        """Finds outlines of shapes listed in indices, using chunked processing.
 
         Parameters
         ----------
@@ -1703,20 +1703,96 @@ class ShapeList:
         triangles : np.ndarray
             Mx3 array of any indices of vertices for triangles of outline
         """
-        shapes_list = [self.shapes[i] for i in indices]
-        offsets = np.vstack([s._edge_offsets for s in shapes_list])
-        centers = np.vstack([s._edge_vertices for s in shapes_list])
-        vert_count = np.cumsum(
-            [0] + [len(s._edge_vertices) for s in shapes_list]
+        # Based on benchmarking, a chunk_size of 500 provides a good balance
+        # of performance for a wide range of shape counts.
+        chunk_size = 500
+
+        if not isinstance(indices, list):
+            indices = list(indices)
+        if not indices:
+            return (
+                np.empty((0, self.ndisplay), dtype=CoordinateDtype),
+                np.empty((0, self.ndisplay), dtype=CoordinateDtype),
+                np.empty((0, 3), dtype=TriangleDtype),
+            )
+
+        centers_blocks = []
+        offsets_blocks = []
+        triangles_blocks = []
+
+        n_verts_cumsum = 0
+
+        for start in range(0, len(indices), chunk_size):
+            stop = min(start + chunk_size, len(indices))
+            chunk_indices = indices[start:stop]
+            chunk_shapes = [self.shapes[i] for i in chunk_indices]
+
+            chunk_centers = []
+            chunk_offsets = []
+            chunk_tris = []
+            n_verts_per_shape = []
+            n_tris_per_shape = []
+
+            for s in chunk_shapes:
+                verts = s._edge_vertices
+                chunk_centers.append(verts)
+                chunk_offsets.append(s._edge_offsets)
+                tris = s._edge_triangles
+                chunk_tris.append(tris)
+                n_verts_per_shape.append(verts.shape[0])
+                n_tris_per_shape.append(tris.shape[0])
+
+            centers = (
+                np.concatenate(chunk_centers)
+                if chunk_centers
+                else np.empty((0, self.ndisplay), dtype=CoordinateDtype)
+            )
+            offsets = (
+                np.concatenate(chunk_offsets)
+                if chunk_offsets
+                else np.empty((0, self.ndisplay), dtype=CoordinateDtype)
+            )
+            triangles = (
+                np.concatenate(chunk_tris)
+                if chunk_tris
+                else np.empty((0, 3), dtype=TriangleDtype)
+            )
+
+            # Offset triangle indices to account for previous blocks
+            if triangles.shape[0] > 0:
+                vert_offsets = np.zeros(
+                    len(n_verts_per_shape), dtype=triangles.dtype
+                )
+                if len(vert_offsets) > 1:
+                    np.cumsum(n_verts_per_shape[:-1], out=vert_offsets[1:])
+                tri_offsets = np.repeat(vert_offsets, n_tris_per_shape)
+                triangles = (
+                    triangles + tri_offsets[:, np.newaxis] + n_verts_cumsum
+                )
+
+            centers_blocks.append(centers)
+            offsets_blocks.append(offsets)
+            triangles_blocks.append(triangles)
+
+            n_verts_cumsum += centers.shape[0]
+
+        final_centers = (
+            np.concatenate(centers_blocks)
+            if centers_blocks
+            else np.empty((0, self.ndisplay), dtype=CoordinateDtype)
         )
-        triangles = np.vstack(
-            [
-                s._edge_triangles + c
-                for s, c in zip(shapes_list, vert_count, strict=False)
-            ]
+        final_offsets = (
+            np.concatenate(offsets_blocks)
+            if offsets_blocks
+            else np.empty((0, self.ndisplay), dtype=CoordinateDtype)
+        )
+        final_triangles = (
+            np.concatenate(triangles_blocks)
+            if triangles_blocks
+            else np.empty((0, 3), dtype=TriangleDtype)
         )
 
-        return centers, offsets, triangles
+        return final_centers, final_offsets, final_triangles
 
     def shapes_in_box(self, corners):
         """Determines which shapes, if any, are inside an axis aligned box.
