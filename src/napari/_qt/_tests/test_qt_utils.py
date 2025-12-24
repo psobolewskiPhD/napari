@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pytest
-from qtpy import API_NAME
 from qtpy.QtCore import QByteArray, QObject, Signal
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import QColorDialog, QMainWindow
@@ -67,13 +66,13 @@ def test_str_to_qbytearray_valid():
 
 
 def test_str_to_qbytearray_invalid():
-    with pytest.raises(ValueError, match='Invalid QByte string.'):
+    with pytest.raises(ValueError, match='Invalid QByte string'):
         str_to_qbytearray('')
 
-    with pytest.raises(ValueError, match='Invalid QByte string.'):
+    with pytest.raises(ValueError, match='Invalid QByte string'):
         str_to_qbytearray('FOOBAR')
 
-    with pytest.raises(ValueError, match='Invalid QByte string.'):
+    with pytest.raises(ValueError, match='Invalid QByte string'):
         str_to_qbytearray(
             '_AAAA/wAAAAD9AAAAAgAAAAAAAAECAAACePwCAAAAAvsAAAAcAGwAYQB5AGUAcgAgAGMAbwBuAHQAcgBvAGwAcwEAAAAAAAABFwAAARcAAAEX+wAAABQAbABhAHkAZQByACAAbABpAHMAdAEAAAEXAAABYQAAALcA////AAAAAwAAAAAAAAAA/AEAAAAB+wAAAA4AYwBvAG4AcwBvAGwAZQAAAAAA/////wAAADIA////AAADPAAAAngAAAAEAAAABAAAAAgAAAAI/AAAAAA='
         )
@@ -141,14 +140,9 @@ def _assert_eq(p1: Any, p2: Any, text: str = '') -> None:
         assert p1 == p2, text
 
 
-if API_NAME == 'PySide2':
-    DEFAULT_COLOR_HEX = '#000000'
-    DEFAULT_COLOR_ARRAY = np.asarray([0, 0, 0])
-    DEFAULT_COLOR_QCOLOR = QColor(0, 0, 0)
-else:
-    DEFAULT_COLOR_HEX = '#ffffff'
-    DEFAULT_COLOR_ARRAY = np.asarray([1, 1, 1])
-    DEFAULT_COLOR_QCOLOR = QColor(255, 255, 255)
+DEFAULT_COLOR_HEX = '#ffffff'
+DEFAULT_COLOR_ARRAY = np.asarray([1, 1, 1])
+DEFAULT_COLOR_QCOLOR = QColor(255, 255, 255)
 
 
 @pytest.mark.parametrize(

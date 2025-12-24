@@ -271,7 +271,7 @@ def test_export_figure_3d(
     # shape is greater than the original data shape
     viewer_model.camera.angles = (45, 45, 45)
     img = qt_viewer.export_figure(flash=False)
-    np.testing.assert_allclose(img.shape, (171, 339, 4), atol=1)
+    np.testing.assert_allclose(img.shape, (255, 258, 4), atol=1)
 
     # FIXME: Changes introduced in #7870 slightly changed the timing and result in a blank canvas.
     # Probably related to #8033. Because canvass size is still correct, we know it would look alright
@@ -1227,7 +1227,7 @@ def test_viewer_drag_to_zoom(
     assert viewer_model._zoom_box.visible is True, (
         'Zoom box should remain visible during drag'
     )
-    assert viewer_model._zoom_box.canvas_positions == ((0, 0), (100, 100)), (
+    assert viewer_model._zoom_box.position == ((0, 0), (100, 100)), (
         'Zoom box canvas positions should match the drag coordinates'
     )
 
@@ -1287,6 +1287,6 @@ def test_viewer_drag_to_zoom_with_cancel(
     assert viewer_model._zoom_box.visible is False, (
         'Zoom box should remain visible during drag'
     )
-    assert viewer_model._zoom_box.canvas_positions == ((0, 0), (0, 0)), (
+    assert viewer_model._zoom_box.position == ((0, 0), (0, 0)), (
         'Zoom box canvas positions should match the drag coordinates'
     )

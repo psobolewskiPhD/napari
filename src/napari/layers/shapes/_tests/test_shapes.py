@@ -2051,7 +2051,7 @@ def test_colormap_without_properties(attribute):
     data = 20 * np.random.random(shape)
     layer = Shapes(data)
 
-    with pytest.raises(ValueError, match='must be a valid Shapes.properties'):
+    with pytest.raises(ValueError, match=r'must be a valid Shapes.properties'):
         setattr(layer, f'{attribute}_color_mode', 'colormap')
 
 
@@ -2408,6 +2408,31 @@ def test_thumbnail():
     layer = Shapes(data)
     layer._update_thumbnail()
     assert layer.thumbnail.shape == layer._thumbnail_shape
+
+
+def test_thumbnail_z_order():
+    """Test the image thumbnail for z-ordered shapes."""
+    data1 = [[0, 0], [0, 20], [20, 20], [20, 0]]
+    data2 = [[0, 0], [0, 20], [20, 20], [20, 0]]
+
+    # Create a layer with the first shape
+    layer = Shapes(data1, shape_type='rectangle', face_color='blue')
+    # Add the second shape, which will have higher z-index
+    layer.add(data2, shape_type='rectangle', face_color='red')
+    assert layer._data_view._z_order[-1] > layer._data_view._z_order[0]
+
+    # Update the thumbnail
+    layer._update_thumbnail()
+
+    center_pixel_coord = (
+        layer._thumbnail_shape[0] // 2,
+        layer._thumbnail_shape[1] // 2,
+    )
+    center_pixel_color = layer.thumbnail[center_pixel_coord]
+
+    # check that red shape is on top
+    red_rgba = (transform_color('red')[0] * 255).astype(np.uint8)
+    assert np.allclose(center_pixel_color, red_rgba)
 
 
 def test_to_masks():
