@@ -9,7 +9,7 @@ from app_model.types import (
     KeyMod,
     StandardKeyBinding,
 )
-from PyQt6.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
 from napari._app_model.constants import MenuGroup, MenuId
 from napari._app_model.context import (
@@ -44,12 +44,9 @@ def _restart(window: Window):
 
 def _close_window(window: Window):
     active_window = QApplication.activeWindow()
-    if active_window is None:
+    if active_window is None or active_window is not window._qt_window:
         return
-    if active_window is not window._qt_window:
-        active_window.close()
-    else:
-        window._qt_window.close(quit_app=False, confirm_need=True)
+    window._qt_window.close(quit_app=False, confirm_need=True)
 
 
 def _close_app(window: Window):
@@ -180,6 +177,7 @@ Q_FILE_ACTIONS: list[Action] = [
         callback=_close_window,
         menus=[{'id': MenuId.MENUBAR_FILE, 'group': MenuGroup.CLOSE}],
         keybindings=[StandardKeyBinding.Close],
+        enablement='_is_active_window',
     ),
     Action(
         id='napari.window.file.restart',
