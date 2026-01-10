@@ -75,11 +75,21 @@ class PreferencesDialog(QDialog):
         self._rebuild_dialog()
 
     def keyPressEvent(self, e: 'QKeyEvent'):
+        # escape and close keybind should just close the window
+        # which implies "reject" like clicking cancel
         if e.key() == Qt.Key.Key_Escape:
-            # escape key should just close the window
-            # which implies "accept"
             e.accept()
-            self.accept()
+            self.reject()
+            return
+        if e.key() == Qt.Key.Key_W and (
+            e.modifiers()
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        ):
+            e.accept()
+            self.reject()
             return
         super().keyPressEvent(e)
 
