@@ -265,7 +265,7 @@ class PreferencesDialog(QDialog):
 
     def closeEvent(self, event: 'QCloseEvent') -> None:
         event.accept()
-        self.accept()
+        self.reject()
 
     def accept(self):
         self._settings.save()
