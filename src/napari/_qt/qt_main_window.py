@@ -178,6 +178,9 @@ class _QtMainWindow(QMainWindow):
         # Ideally this would be in `NapariApplication` but that is outside of Qt
         self._viewer_context = create_context(self)
         self._viewer_context['is_set_trace_active'] = _is_set_trace_active
+        self._viewer_context['_is_active_window'] = (
+            lambda: self.isActiveWindow()
+        )
 
         settings = get_settings()
 
@@ -296,6 +299,12 @@ class _QtMainWindow(QMainWindow):
             with contextlib.suppress(ValueError):
                 inst = _QtMainWindow._instances
                 inst.append(inst.pop(inst.index(self)))
+            # Notify context about window activation change
+            self._viewer_context.changed.emit({'_is_active_window'})
+
+        if e.type() == QEvent.Type.WindowDeactivate:
+            # Notify context about window deactivation
+            self._viewer_context.changed.emit({'_is_active_window'})
 
         res = super().event(e)
 
@@ -871,7 +880,13 @@ class Window:
         menu_model.update_from_context(get_context(layerlist))
 
     def _update_file_menu_state(self):
-        self._update_menu_state('file_menu')
+        # File menu needs both layerlist context (for layer-related actions)
+        # and window context (for window-related actions like close)
+        layerlist = self._qt_viewer.viewer.layers
+        layerlist_ctx = get_context(layerlist)
+        viewer_ctx = get_context(self._qt_window)
+        merged_ctx = {**layerlist_ctx, **viewer_ctx}
+        self.file_menu.update_from_context(merged_ctx)
 
     def _update_view_menu_state(self):
         self._update_menu_state('view_menu')
