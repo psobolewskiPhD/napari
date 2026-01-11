@@ -220,13 +220,15 @@ def test_preferences_dialog_ok(qtbot, pref):
 def test_preferences_dialog_close(qtbot, pref):
     with qtbot.waitSignal(pref.finished):
         pref.close()
-    assert get_settings().appearance.theme == 'light'
+    # close acts as cancel, so theme should be unchanged
+    assert get_settings().appearance.theme == 'dark'
 
 
 def test_preferences_dialog_escape(qtbot, pref):
     with qtbot.waitSignal(pref.finished):
         qtbot.keyPress(pref, Qt.Key_Escape)
-    assert get_settings().appearance.theme == 'light'
+    # escape acts as cancel, so theme should be unchanged
+    assert get_settings().appearance.theme == 'dark'
 
 
 @pytest.mark.key_bindings
@@ -362,3 +364,11 @@ def test_startup_script_file_extension(pref):
         pref._stack.widget(0).widget().widget.widgets['startup_script']
     )
     assert startup_script_widget.file_filter() == 'File (*.py)'
+
+
+@pytest.mark.parametrize('modifier', [Qt.ControlModifier, Qt.MetaModifier])
+def test_preferences_dialog_ctrl_w(qtbot, pref, modifier):
+    with qtbot.waitSignal(pref.finished):
+        qtbot.keyPress(pref, Qt.Key_W, modifier)
+    # Control/Command-W acts as cancel, so theme should be unchanged
+    assert get_settings().appearance.theme == 'dark'
