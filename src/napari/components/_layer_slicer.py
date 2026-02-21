@@ -113,6 +113,9 @@ class _LayerSlicer:
         self._layers_to_task: dict[
             tuple[weakref.ReferenceType[Layer], ...], Future
         ] = {}
+        self._task_to_requests: dict[
+            Future, dict[weakref.ReferenceType[Layer], _SliceRequest]
+        ] = {}
         self._lock_layers_to_task = RLock()
 
     @contextmanager
@@ -238,6 +241,7 @@ class _LayerSlicer:
             # a task to remove in the done callback.
             with self._lock_layers_to_task:
                 self._layers_to_task[tuple(requests)] = task
+                self._task_to_requests[task] = requests
             task.add_done_callback(self._on_slice_done)
 
         # Then execute sync slicing tasks to run concurrent with async ones.
@@ -286,12 +290,32 @@ class _LayerSlicer:
         Can be called from the main or slicing thread.
         """
         logger.debug('_LayerSlicer._on_slice_done: %s', id(task))
+        with self._lock_layers_to_task:
+            requests = self._task_to_requests.pop(task, None)
+
         if not self._try_to_remove_task(task):
             logger.debug('Task not found: %s', id(task))
 
         if task.cancelled():
             logger.debug('Cancelled task: %s', id(task))
             return
+
+        if exception := task.exception():
+            logger.debug('Task failed: %s', id(task))
+            if requests:
+                for weak_layer, request in requests.items():
+                    if layer := weak_layer():
+                        # Mark the failed request as complete so layers don't
+                        # remain forever "loading" after an exception.
+                        layer._slicing_state._update_loaded_slice_id(
+                            request.id
+                        )
+
+            from napari.utils.notifications import notification_manager
+
+            notification_manager.receive_error(
+                type(exception), exception, exception.__traceback__
+            )
 
     def _try_to_remove_task(self, task: Future[dict]) -> bool:
         """
