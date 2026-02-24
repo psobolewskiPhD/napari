@@ -103,9 +103,11 @@ class _LayerSlicer:
             if true, forces slicing to execute synchronously
         _layers_to_task : dict of tuples of layer weakrefs to futures
             task storage for cancellation logic
-        _lock_layers_to_task : threading.RLock
-            lock to guard against changes to `_layers_to_task` when finding,
-            adding, or removing tasks.
+        _task_to_requests : dict of futures to slice requests
+            maps completed tasks back to their layer and slice requests,
+        _lock_futures_dicts : threading.RLock
+            lock to guard against concurrent changes to `_layers_to_task`
+            and `_task_to_requests` when finding, adding, or removing tasks
         """
         self.events = EmitterGroup(source=self, ready=Event)
         self._executor: Executor = ThreadPoolExecutor(max_workers=1)
@@ -116,7 +118,7 @@ class _LayerSlicer:
         self._task_to_requests: dict[
             Future, dict[weakref.ReferenceType[Layer], _SliceRequest]
         ] = {}
-        self._lock_layers_to_task = RLock()
+        self._lock_futures_dicts = RLock()
 
     @contextmanager
     def force_sync(self):
@@ -239,7 +241,7 @@ class _LayerSlicer:
             task = self._executor.submit(self._slice_layers, requests)
             # Store task before adding done callback to ensure there is always
             # a task to remove in the done callback.
-            with self._lock_layers_to_task:
+            with self._lock_futures_dicts:
                 self._layers_to_task[tuple(requests)] = task
                 self._task_to_requests[task] = requests
             task.add_done_callback(self._on_slice_done)
@@ -290,7 +292,7 @@ class _LayerSlicer:
         Can be called from the main or slicing thread.
         """
         logger.debug('_LayerSlicer._on_slice_done: %s', id(task))
-        with self._lock_layers_to_task:
+        with self._lock_futures_dicts:
             requests = self._task_to_requests.pop(task, None)
 
         if not self._try_to_remove_task(task):
@@ -325,7 +327,7 @@ class _LayerSlicer:
         This function provides a lock to ensure that the layers_to_task dict
         is unmodified during this process.
         """
-        with self._lock_layers_to_task:
+        with self._lock_futures_dicts:
             for k_layers, v_task in self._layers_to_task.items():
                 if v_task == task:
                     del self._layers_to_task[k_layers]
@@ -342,7 +344,7 @@ class _LayerSlicer:
         This function provides a lock to ensure that the layers_to_task dict
         is unmodified during this process.
         """
-        with self._lock_layers_to_task:
+        with self._lock_futures_dicts:
             layer_set = set(layers)
             for weak_task_layers, task in self._layers_to_task.items():
                 task_layers = {w() for w in weak_task_layers} - {None}
