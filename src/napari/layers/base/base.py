@@ -2120,24 +2120,37 @@ class Layer(KeymapProvider, MousemapProvider, ABC, metaclass=PostInit):
             # handle now and downsample_factors is also only on image layers.
             max_coords = np.take(self.data[level].shape, displayed_axes) - 1
             corners[:, displayed_axes] = np.clip(scaled_corners, 0, max_coords)
+            lowest_level = len(self.level_shapes) - 1
+            if level == lowest_level:
+                # The coarsest level is already loaded as a contiguous np.array
+                # (it doubles as the thumbnail source), so always use the full
+                # extent to skip reslicing on every pan/zoom.
+                corners[0, displayed_axes] = 0
+                corners[1, displayed_axes] = max_coords
             display_shape = tuple(
                 corners[1, displayed_axes] - corners[0, displayed_axes]
             )
             if any(s == 0 for s in display_shape):
                 return
-            # only update when level changes or
-            # when new view is outside current corner_pixels
-            if (
-                self.data_level != level
-                or np.any(
-                    corners[0, displayed_axes]
-                    < self.corner_pixels[0, displayed_axes]
+            if level == lowest_level:
+                # corners are always the full extent here, so only refresh
+                # when arriving at this level for the first time.
+                needs_update = self.data_level != level
+            else:
+                # only update when level changes or
+                # when new view is outside current corner_pixels
+                needs_update = (
+                    self.data_level != level
+                    or np.any(
+                        corners[0, displayed_axes]
+                        < self.corner_pixels[0, displayed_axes]
+                    )
+                    or np.any(
+                        corners[1, displayed_axes]
+                        > self.corner_pixels[1, displayed_axes]
+                    )
                 )
-                or np.any(
-                    corners[1, displayed_axes]
-                    > self.corner_pixels[1, displayed_axes]
-                )
-            ):
+            if needs_update:
                 self._data_level = level
                 self.corner_pixels = corners
                 self.refresh(extent=False, thumbnail=False)
