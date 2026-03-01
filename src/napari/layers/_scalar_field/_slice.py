@@ -196,7 +196,13 @@ class _ScalarFieldSliceRequest:
     thumbnail_level_data : np.ndarray | None
         Pre-materialized numpy array of the thumbnail level.
         Used for the multiscale thumbnail and also for
-        the image tile when ``data_level == thumbnail_level``
+        the image tile when requested level is thumbnail_level
+    home_level : int | None
+        Data level index of the 'home' level used by reset_view()
+        whose pre-materialized data may be used when available.
+    home_level_data : np.ndarray | None
+        Pre-materialized numpy array of the home level;
+        used when ``home_level`` is set and requested level is home_level
     id : int
         The identifier of this slice request.
     """
