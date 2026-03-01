@@ -378,7 +378,7 @@ class ScalarFieldBase(Layer, ABC):
         self.refresh(extent=False)
 
     def _reset_thumbnail_level_data(self) -> None:
-        """Set ``_thumbnail_level`` and pre-materialize its data.
+        """Set thumbnail cache and reset home-level cache for current data.
 
         Called once during ``__init__`` and again whenever ``data`` is
         replaced, so the cached array always matches the current dataset.
@@ -397,6 +397,8 @@ class ScalarFieldBase(Layer, ABC):
         else:
             self._thumbnail_level = 0
             self._slicing_state._thumbnail_level_data = None
+        self._slicing_state._home_level = None
+        self._slicing_state._home_level_data = None
 
     def _update_dims(self) -> None:
         """Extend base _update_dims to keep thumbnail level data in sync.
@@ -765,6 +767,8 @@ class ScalarFieldSlicingState(_LayerSlicingState):
             level_shapes=self.layer.level_shapes,
             downsample_factors=self.layer.downsample_factors,
             thumbnail_level_data=self._thumbnail_level_data,
+            home_level=self._home_level,
+            home_level_data=self._home_level_data,
         )
 
     def _update_slice_response(

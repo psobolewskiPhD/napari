@@ -124,6 +124,10 @@ class _LayerSlicingState(ABC):
     def __init__(self, layer: Layer, data: LayerDataType, cache: bool):
         self.layer = layer
         self.dask_optimized_slicing = configure_dask(data, cache)
+        # Defined here because _update_draw (on Layer) reads them;
+        # only populated by multiscale scalar-field layers.
+        self._home_level: int | None = None
+        self._home_level_data: np.ndarray | None = None
         self._slice_input = _SliceInput(
             ndisplay=2,
             world_slice=_ThickNDSlice.make_full(ndim=self.ndim),
@@ -2121,10 +2125,24 @@ class Layer(KeymapProvider, MousemapProvider, ABC, metaclass=PostInit):
             max_coords = np.take(self.data[level].shape, displayed_axes) - 1
             corners[:, displayed_axes] = np.clip(scaled_corners, 0, max_coords)
             lowest_level = len(self.level_shapes) - 1
-            if level == lowest_level:
-                # The coarsest level is already loaded as a contiguous np.array
-                # (it doubles as the thumbnail source), so always use the full
-                # extent to skip reslicing on every pan/zoom.
+            # Track the first viewport-selected level ("home" level)
+            # for the full-extent / skip-refresh optimisation.
+            if self._slicing_state._home_level is None:
+                self._slicing_state._home_level = level
+                # Only materialise this level if it isn't the thumbnail
+                if level != self._thumbnail_level:
+                    self._slicing_state._home_level_data = np.asarray(
+                        self._data[level]
+                    )
+            home_level = self._slicing_state._home_level
+            is_fully_cached = level == lowest_level or (
+                home_level is not None and level == home_level
+            )
+            if is_fully_cached:
+                # Level data is held (or will be cached by dask) as a
+                # contiguous array, so send the full extent to the GPU and
+                # let the texture handle panning — avoids reslicing on
+                # every pan/zoom.
                 corners[0, displayed_axes] = 0
                 corners[1, displayed_axes] = max_coords
             display_shape = tuple(
@@ -2132,7 +2150,7 @@ class Layer(KeymapProvider, MousemapProvider, ABC, metaclass=PostInit):
             )
             if any(s == 0 for s in display_shape):
                 return
-            if level == lowest_level:
+            if is_fully_cached:
                 # corners are always the full extent here, so only refresh
                 # when arriving at this level for the first time.
                 needs_update = self.data_level != level

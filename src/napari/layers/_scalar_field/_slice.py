@@ -214,6 +214,8 @@ class _ScalarFieldSliceRequest:
     level_shapes: np.ndarray = field(repr=False)
     downsample_factors: np.ndarray = field(repr=False)
     thumbnail_level_data: np.ndarray | None = field(default=None, repr=False)
+    home_level: int | None = field(default=None, repr=False)
+    home_level_data: np.ndarray | None = field(default=None, repr=False)
     id: int = field(default_factory=_next_request_id)
 
     def __call__(self) -> _ScalarFieldSliceResponse:
@@ -264,9 +266,16 @@ class _ScalarFieldSliceRequest:
         thumb_source = self.thumbnail_level_data
         if thumb_source is None:
             thumb_source = self.data[self.thumbnail_level]
-        data = (
-            thumb_source if level == self.thumbnail_level else self.data[level]
-        )
+        if (
+            self.home_level is not None
+            and level == self.home_level
+            and self.home_level_data is not None
+        ):
+            data = self.home_level_data
+        elif level == self.thumbnail_level:
+            data = thumb_source
+        else:
+            data = self.data[level]
 
         translate = np.zeros(self.slice_input.ndim)
         disp_slice = [slice(None) for _ in data.shape]
