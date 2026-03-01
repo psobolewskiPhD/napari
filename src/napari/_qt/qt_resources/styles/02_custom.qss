@@ -77,7 +77,7 @@ QMainWindow::separator:vertical {
 }
 
 #QtCustomTitleBar > QLabel {
-  color: {{ primary }};
+  color: {{ text }};
   font-size: {{ decrease(font_size, 1) }};
 }
 
