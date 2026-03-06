@@ -248,7 +248,15 @@ def _auto_shutdown_dask_threadworkers():
     We don't assert the number of threads in unchanged as other things
     modify the number of threads.
     """
-    assert dask.threaded.default_pool is None
+    # Reset pool regardless of initial state (handles xdist case)
+    if dask.threaded.default_pool is not None:
+        if isinstance(dask.threaded.default_pool, ThreadPool):
+            dask.threaded.default_pool.close()
+            dask.threaded.default_pool.join()
+        else:
+            dask.threaded.default_pool.shutdown()
+        dask.threaded.default_pool = None
+
     try:
         yield
     finally:
