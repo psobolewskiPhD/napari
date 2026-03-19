@@ -1,16 +1,6 @@
 import base64
 import html
 from io import BytesIO
-from warnings import warn
-
-try:
-    from lxml.etree import ParserError
-    from lxml.html import document_fromstring
-    from lxml.html.clean import Cleaner
-
-    lxml_unavailable = False
-except ImportError:
-    lxml_unavailable = True
 
 from napari.utils.io import imsave_png
 
@@ -83,28 +73,15 @@ class NotebookScreenshot:
 
     def _clean_alt_text(self, alt_text):
         """Clean user input to prevent script injection."""
+        import nh3
+
         if alt_text is not None:
-            if lxml_unavailable:
-                warn(
-                    'The lxml_html_clean library is not installed, and is '
-                    'required to sanitize alt text for napari screenshots. '
-                    'Alt Text will be stripped altogether.'
-                )
-                return None
-            # cleaner won't recognize escaped script tags, so always unescape
-            # to be safe
+            # nh3 won't recognize escaped tags, so always unescape
             alt_text = html.unescape(str(alt_text))
-            cleaner = Cleaner()
-            try:
-                doc = document_fromstring(alt_text)
-                alt_text = cleaner.clean_html(doc).text_content()
-            except ParserError:
-                warn(
-                    'The provided alt text does not constitute valid html, so it was discarded.',
-                    stacklevel=3,
-                )
-                alt_text = ''
-            if alt_text == '':
+            # sanitize html and remove all tags
+            alt_text = nh3.clean(alt_text, tags=set())
+            # disallow empty strings or only whitespace
+            if alt_text == '' or alt_text.isspace():
                 alt_text = None
         return alt_text
 
