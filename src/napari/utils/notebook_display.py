@@ -73,7 +73,17 @@ class NotebookScreenshot:
 
     def _clean_alt_text(self, alt_text):
         """Clean user input to prevent script injection."""
-        import nh3
+        try:
+            import nh3
+        except ImportError:
+            import warnings
+
+            warnings.warn(
+                'The nh3 library is not installed, and is required to '
+                'sanitize alt text for napari screenshots. Alt-text '
+                'will be stripped altogether without nh3.'
+            )
+            return None
 
         if alt_text is not None:
             # nh3 won't recognize escaped tags, so always unescape
