@@ -34,7 +34,7 @@ class VispyWelcomeOverlay(ViewerOverlayMixin, VispyCanvasOverlay):
         parent: Node | None = None,
     ) -> None:
         super().__init__(
-            node=Welcome(font_manager=font_manager, face=font_family),
+            node=Welcome(face=font_family),
             viewer=viewer,
             overlay=overlay,
             parent=parent,

@@ -4,7 +4,7 @@ import logging
 import re
 import textwrap
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import qtpy
@@ -23,8 +23,6 @@ from napari.utils.action_manager import action_manager
 from napari.utils.interactions import Shortcut
 
 if TYPE_CHECKING:
-    from vispy.visuals.text.text import FontManager
-
     from napari.utils.color import ColorValue
 
 vispy_logger = logging.getLogger('vispy')
@@ -46,18 +44,39 @@ def _load_logo() -> np.ndarray:
 def _qimage_to_array(
     image: QImage,
 ) -> np.ndarray[tuple[int, int, int], np.dtype[np.uint8]]:
+    """Convert a QImage to an RGBA uint8 numpy array."""
     if image.format() != QImage.Format_ARGB32:
         image = image.convertToFormat(QImage.Format_ARGB32)
     bits = image.constBits()
-    height, width, channels = image.height(), image.width(), 4
+    h, w, c = image.height(), image.width(), 4
 
     if qtpy.API_NAME.startswith('PySide'):
-        array = np.array(bits).reshape(height, width, channels)
+        array = np.array(bits).reshape(h, w, c)
     else:
-        bits.setsize(height * width * channels)
-        array = np.frombuffer(bits, np.uint8).reshape(height, width, channels)
+        bits.setsize(h * w * c)
+        array = np.frombuffer(bits, np.uint8).reshape(h, w, c)
 
+    # ARGB32 → RGBA
     return array[:, :, [2, 1, 0, 3]]
+
+
+class _TextBlock(NamedTuple):
+    """A positioned block of text with alignment."""
+
+    text: str
+    x: float
+    y: float
+    line_height: float
+    anchor_x: str  # 'left', 'center', or 'right'
+
+
+def _aligned_x(x: float, width: float, anchor: str) -> float:
+    """Return left-edge x coordinate given anchor alignment."""
+    if anchor == 'center':
+        return x - width / 2
+    if anchor == 'right':
+        return x - width
+    return x
 
 
 class Welcome(Node):
@@ -66,7 +85,7 @@ class Welcome(Node):
     _body_line_height = 1.15
     _text_padding = 12.0
 
-    def __init__(self, font_manager: FontManager, face: str) -> None:
+    def __init__(self, face: str, **_kwargs: Any) -> None:
         self.logo_coords = _load_logo()
         super().__init__()
         self._face = face
@@ -184,37 +203,39 @@ class Welcome(Node):
         self._update_font_metrics()
         return True
 
-    def _text_blocks(self) -> tuple[dict[str, Any], ...]:
-        text_scale = self._text_scale
+    def _text_blocks(self) -> tuple[_TextBlock, ...]:
+        s = self._text_scale
+        fh = self.font_height
+        body_lh = self._body_line_height
         return (
-            {
-                'text': self._header_text,
-                'x': 0.0,
-                'y': -10.0 * text_scale,
-                'line_height': self._header_line_height,
-                'anchor_x': 'center',
-            },
-            {
-                'text': self._shortcut_keybindings_text,
-                'x': -80.0 * text_scale,
-                'y': 2.75 * self.font_height * text_scale,
-                'line_height': self._body_line_height,
-                'anchor_x': 'right',
-            },
-            {
-                'text': self._shortcut_descriptions_text,
-                'x': -60.0 * text_scale,
-                'y': 2.75 * self.font_height * text_scale,
-                'line_height': self._body_line_height,
-                'anchor_x': 'left',
-            },
-            {
-                'text': self._tip_text,
-                'x': 0.0,
-                'y': 7.5 * self.font_height * text_scale,
-                'line_height': self._body_line_height,
-                'anchor_x': 'center',
-            },
+            _TextBlock(
+                text=self._header_text,
+                x=0.0,
+                y=-10.0 * s,
+                line_height=self._header_line_height,
+                anchor_x='center',
+            ),
+            _TextBlock(
+                text=self._shortcut_keybindings_text,
+                x=-80.0 * s,
+                y=2.75 * fh * s,
+                line_height=body_lh,
+                anchor_x='right',
+            ),
+            _TextBlock(
+                text=self._shortcut_descriptions_text,
+                x=-60.0 * s,
+                y=2.75 * fh * s,
+                line_height=body_lh,
+                anchor_x='left',
+            ),
+            _TextBlock(
+                text=self._tip_text,
+                x=0.0,
+                y=7.5 * fh * s,
+                line_height=body_lh,
+                anchor_x='center',
+            ),
         )
 
     def _text_size(
@@ -222,130 +243,91 @@ class Welcome(Node):
     ) -> tuple[float, float]:
         if not text:
             return 0.0, 0.0
-
         lines = text.splitlines()
-        width = max(
-            self._font_metrics.horizontalAdvance(line) for line in lines
-        )
-        height = self._font_metrics.height() * len(lines)
-        height += (
-            self._font_metrics.height()
-            * (line_height - 1)
-            * max(len(lines) - 1, 0)
-        )
-        return (
-            width / self._device_pixel_ratio,
-            height / self._device_pixel_ratio,
-        )
+        dpr = self._device_pixel_ratio
+        fm = self._font_metrics
+        width = max(fm.horizontalAdvance(line) for line in lines) / dpr
+        n = len(lines)
+        # total line heights + extra inter-line spacing
+        height = fm.height() * (n + (line_height - 1) * max(n - 1, 0)) / dpr
+        return width, height
 
     def _block_bounds(
-        self, block: dict[str, Any]
+        self, block: _TextBlock
     ) -> tuple[float, float, float, float]:
         width, height = self._text_size(
-            block['text'], line_height=block['line_height']
+            block.text, line_height=block.line_height
         )
-        x = block['x']
-        y = block['y']
-        anchor_x = block['anchor_x']
-
-        if anchor_x == 'center':
-            left = x - width / 2
-            right = x + width / 2
-        elif anchor_x == 'right':
-            left = x - width
-            right = x
-        else:
-            left = x
-            right = x + width
-
-        top = y - height
-        bottom = y
-        return left, top, right, bottom
+        left = _aligned_x(block.x, width, block.anchor_x)
+        return left, block.y - height, left + width, block.y
 
     def _draw_block(
         self,
         painter: QPainter,
-        block: dict[str, Any],
+        block: _TextBlock,
         *,
-        left: float,
-        top: float,
+        block_top: float,
+        img_left: float,
+        img_top: float,
     ) -> None:
-        if not block['text']:
+        if not block.text:
             return
 
-        anchor_x = block['anchor_x']
-        line_height = block['line_height']
-        x = block['x']
-        y = block['y']
-        _width, height = self._text_size(
-            block['text'], line_height=line_height
-        )
-        lines = block['text'].splitlines()
-        current_y = (
-            y - height + self._font_metrics.ascent() / self._device_pixel_ratio
-        )
-        line_step = (
-            self._font_metrics.height() / self._device_pixel_ratio
-        ) * line_height
+        dpr = self._device_pixel_ratio
+        fm = self._font_metrics
+        current_y = block_top + fm.ascent() / dpr
+        line_step = (fm.height() / dpr) * block.line_height
 
-        for line in lines:
-            line_width = (
-                self._font_metrics.horizontalAdvance(line)
-                / self._device_pixel_ratio
-            )
-            if anchor_x == 'center':
-                line_x = x - line_width / 2
-            elif anchor_x == 'right':
-                line_x = x - line_width
-            else:
-                line_x = x
-
+        for line in block.text.splitlines():
+            line_width = fm.horizontalAdvance(line) / dpr
+            line_x = _aligned_x(block.x, line_width, block.anchor_x)
             painter.drawText(
                 QPointF(
-                    (line_x - left) * self._device_pixel_ratio,
-                    (current_y - top) * self._device_pixel_ratio,
+                    (line_x - img_left) * dpr,
+                    (current_y - img_top) * dpr,
                 ),
                 line,
             )
             current_y += line_step
 
     def _update_text_image(self) -> None:
-        blocks = tuple(block for block in self._text_blocks() if block['text'])
+        blocks = [b for b in self._text_blocks() if b.text]
         if not blocks:
             self._text_bounds = (-0.5, -0.5, 0.5, 0.5)
             self.text_image.set_data(np.zeros((1, 1, 4), dtype=np.uint8))
             return
 
-        bounds = [self._block_bounds(block) for block in blocks]
-        left = min(bound[0] for bound in bounds) - self._text_padding
-        top = min(bound[1] for bound in bounds) - self._text_padding
-        right = max(bound[2] for bound in bounds) + self._text_padding
-        bottom = max(bound[3] for bound in bounds) + self._text_padding
+        block_bounds = [self._block_bounds(b) for b in blocks]
+        pad = self._text_padding
+        img_left = min(b[0] for b in block_bounds) - pad
+        img_top = min(b[1] for b in block_bounds) - pad
+        img_right = max(b[2] for b in block_bounds) + pad
+        img_bottom = max(b[3] for b in block_bounds) + pad
 
-        width = max(int(np.ceil((right - left) * self._device_pixel_ratio)), 1)
-        height = max(
-            int(np.ceil((bottom - top) * self._device_pixel_ratio)), 1
-        )
-        image = QImage(width, height, QImage.Format_ARGB32)
+        dpr = self._device_pixel_ratio
+        px_w = max(int(np.ceil((img_right - img_left) * dpr)), 1)
+        px_h = max(int(np.ceil((img_bottom - img_top) * dpr)), 1)
+        image = QImage(px_w, px_h, QImage.Format_ARGB32)
         image.fill(0)
 
         painter = QPainter(image)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.TextAntialiasing)
         painter.setFont(self._font)
-        painter.setPen(
-            QColor.fromRgbF(
-                float(self._text_color[0]),
-                float(self._text_color[1]),
-                float(self._text_color[2]),
-                float(self._text_color[3]),
+        painter.setPen(QColor.fromRgbF(*map(float, self._text_color)))
+        for block, (_, block_top, _, _) in zip(
+            blocks, block_bounds, strict=False
+        ):
+            self._draw_block(
+                painter,
+                block,
+                block_top=block_top,
+                img_left=img_left,
+                img_top=img_top,
             )
-        )
-        for block in blocks:
-            self._draw_block(painter, block, left=left, top=top)
         painter.end()
 
-        self._text_bounds = (left, top, right, bottom)
+        self._text_bounds = (img_left, img_top, img_right, img_bottom)
         self.text_image.set_data(_qimage_to_array(image))
 
     @staticmethod
@@ -384,18 +366,9 @@ class Welcome(Node):
             self._update_text_image()
 
         left, top, _, _ = self._text_bounds
-        self.text_image.transform.translate = (
-            x / 2 + left,
-            y / 2 + top,
-            0,
-            0,
-        )
-        self.text_image.transform.scale = (
-            1 / self._device_pixel_ratio,
-            1 / self._device_pixel_ratio,
-            1,
-            1,
-        )
+        dpr = self._device_pixel_ratio
+        self.text_image.transform.translate = (x / 2 + left, y / 2 + top, 0, 0)
+        self.text_image.transform.scale = (1 / dpr, 1 / dpr, 1, 1)
 
     def set_gl_state(self, *args: Any, **kwargs: Any) -> None:
         for node in self.children:
