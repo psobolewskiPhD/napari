@@ -2176,6 +2176,30 @@ class Layer(KeymapProvider, MousemapProvider, ABC, metaclass=PostInit):
                 data_bbox_clipped = np.clip(
                     data_bbox_int, displayed_extent[0], displayed_extent[1]
                 )
+                if self.multiscale:
+                    # Store corner pixels in the coordinate space of the
+                    # current level.
+                    data_bbox_clipped = (
+                        data_bbox_clipped
+                        / self.downsample_factors[
+                            self.data_level, displayed_axes
+                        ]
+                    )
+                    data_bbox_clipped = np.array(
+                        [
+                            np.floor(data_bbox_clipped[0]),
+                            np.ceil(data_bbox_clipped[1]),
+                        ]
+                    ).astype(int)
+                    max_coords = (
+                        np.take(
+                            self.level_shapes[self.data_level], displayed_axes
+                        )
+                        - 1
+                    )
+                    data_bbox_clipped = np.clip(
+                        data_bbox_clipped, 0, max_coords
+                    )
                 corners[:, displayed_axes] = data_bbox_clipped
             self.corner_pixels = corners
 

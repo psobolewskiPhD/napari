@@ -4,8 +4,14 @@ import skimage
 from skimage.transform import pyramid_gaussian
 
 from napari._tests.utils import check_layer_world_data_extent
+from napari.components.dims import Dims
 from napari.layers import Image
 from napari.utils import Colormap
+
+
+def _set_view_slice_from_dims(layer: Image, dims: Dims) -> None:
+    layer._slicing_state.set_slice_input_from_dims(dims, force=True)
+    layer.set_view_slice()
 
 
 def test_random_multiscale():
@@ -498,3 +504,67 @@ def test_update_draw_variable_canvas_size_fixed_fov(
 
     assert layer.data_level == exp_level
     np.testing.assert_equal(layer.corner_pixels, exp_corner_pixels_data)
+
+
+def test_multiscale_3d_draw_scales_corner_pixels_for_2d_slicing():
+    shapes = [(100, 1000, 1000), (100, 500, 500), (100, 250, 250)]
+    data = [np.zeros(s, dtype=np.float32) for s in shapes]
+    layer = Image(data, multiscale=True)
+
+    dims3 = Dims(
+        ndim=3,
+        ndisplay=3,
+        order=(0, 1, 2),
+        point=(0, 0, 0),
+        range=((0, 99, 1), (0, 999, 1), (0, 999, 1)),
+    )
+    _set_view_slice_from_dims(layer, dims3)
+
+    layer._update_draw(
+        scale_factor=1,
+        corner_pixels_displayed=np.array([[0, 400, 400], [99, 600, 600]]),
+        shape_threshold=(800, 800, 800),
+    )
+
+    assert layer.data_level == 2
+    np.testing.assert_array_equal(
+        layer.corner_pixels,
+        np.array([[0, 100, 100], [99, 150, 150]]),
+    )
+
+    dims2 = Dims(
+        ndim=3,
+        ndisplay=2,
+        order=(0, 1, 2),
+        point=(50, 0, 0),
+        range=((0, 99, 1), (0, 999, 1), (0, 999, 1)),
+    )
+    _set_view_slice_from_dims(layer, dims2)
+
+    assert layer._data_view.shape == (51, 51)
+
+
+def test_multiscale_3d_draw_clips_corner_pixels_to_level_shape():
+    shapes = [(100, 1000, 1000), (100, 333, 333)]
+    data = [np.zeros(s, dtype=np.float32) for s in shapes]
+    layer = Image(data, multiscale=True)
+
+    dims3 = Dims(
+        ndim=3,
+        ndisplay=3,
+        order=(0, 1, 2),
+        point=(0, 0, 0),
+        range=((0, 99, 1), (0, 999, 1), (0, 999, 1)),
+    )
+    _set_view_slice_from_dims(layer, dims3)
+
+    layer._update_draw(
+        scale_factor=1,
+        corner_pixels_displayed=np.array([[0, -20, -20], [99, 1005, 1005]]),
+        shape_threshold=(800, 800, 800),
+    )
+
+    np.testing.assert_array_equal(
+        layer.corner_pixels,
+        np.array([[0, 0, 0], [99, 332, 332]]),
+    )
