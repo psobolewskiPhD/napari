@@ -28,7 +28,7 @@ def _get_provider_actions(type_):
                 superclass
             ).values()
         )
-    return actions
+    return sorted(actions, key=lambda action: action.__name__)
 
 
 def _assert_shortcuts_exist_for_each_action(type_):
