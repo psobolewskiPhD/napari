@@ -1278,7 +1278,22 @@ class Shapes(Layer):
         self._selected_data.replace_selection(selected_data)
 
     def _on_selection_changed(self, added, removed):
-        self._selected_box = self.interaction_box(self.selected_data)
+        # We want the interaction box to only include shapes in the current view
+        # if the user wants to hide them? Or should it be global?
+        # The user says: "Only the shape in view should be highlighted"
+        # So we should filter the interaction box to only include visible shapes.
+        visible_selection = [
+            i for i in self.selected_data if i in self._indices_view
+        ]
+
+        # Also clear hover value if it's no longer visible
+        if (
+            self._value[0] is not None
+            and self._value[0] not in self._indices_view
+        ):
+            self._value = (None, None)
+
+        self._selected_box = self.interaction_box(visible_selection)
 
         # Update properties based on selected shapes
         if len(self.selected_data) > 0:
@@ -2433,13 +2448,11 @@ class Shapes(Layer):
         with self._data_view.batched_updates():
             ndisplay = self._slice_input.ndisplay
             if ndisplay != self._ndisplay_stored:
-                self.selected_data = set()
                 self._data_view.ndisplay = min(self.ndim, ndisplay)
                 self._ndisplay_stored = ndisplay
                 self._clipboard = {}
 
             if self._slice_input.order != self._display_order_stored:
-                self.selected_data = set()
                 self._data_view.update_dims_order(self._slice_input.order)
                 self._display_order_stored = copy(self._slice_input.order)
                 # Clear clipboard if dimensions swap
@@ -2449,7 +2462,10 @@ class Shapes(Layer):
                 self._slice_input.not_displayed
             ]
             if not np.array_equal(slice_key, self._data_view.slice_key):
-                self.selected_data = set()
+                self._value = (None, None)
+                self._outlines_cache.clear()
+                # Update interaction box for new visibility
+                self._on_selection_changed(None, None)
             self._data_view.slice_key = slice_key
 
     def interaction_box(self, index: int | Iterable[int]) -> BoxArray | None:
@@ -2551,27 +2567,47 @@ class Shapes(Layer):
             Mx3 array of any indices of vertices for triangles of outline or
             None
         """
+        # Only highlight selected shapes that are in view
+        selected_in_view = [
+            i for i in self.selected_data if i in self._indices_view
+        ]
+        # Check if we have anything to highlight
         if (
             self._highlight_visible
             and self._value is not None
-            and (self._value[0] is not None or len(self.selected_data) > 0)
+            and (self._value[0] is not None or len(selected_in_view) > 0)
         ):
             value = self._value[0]
-            if value in self.selected_data:
+            # Only consider hovered shape if it is in view,
+            # otherwise it shouldn't be highlighted (hover highlight reset by _set_view_slice)
+            if value is not None and value not in self._indices_view:
+                value = None
+
+            if value in selected_in_view:
                 value = None
 
             if value in self._outlines_cache:
                 centers, offsets, triangles = self._outlines_cache[value]
             else:
-                if len(self.selected_data) > 0:
-                    index = list(self.selected_data)
+                if len(selected_in_view) > 0:
+                    index = list(selected_in_view)
                     if value is not None:
                         index.append(value)
                     index.sort()
                 else:
                     index = value
 
-                centers, offsets, triangles = self._data_view.outline(index)
+                # Only include visible shapes for outline
+                # Re-calculate index to be safe, filtering out invisible ones
+                visible_index = [
+                    i
+                    for i in (index if isinstance(index, list) else [index])
+                    if i in self._indices_view
+                ]
+
+                centers, offsets, triangles = self._data_view.outline(
+                    visible_index
+                )
                 self._outlines_cache[self._value[0]] = (
                     centers,
                     offsets,
@@ -2604,21 +2640,46 @@ class Shapes(Layer):
         width : float
             Width of the box edge
         """
-        if self._highlight_visible and len(self.selected_data) > 0:
-            if self._mode == Mode.SELECT and self._selected_box is not None:
-                # If in select mode just show the interaction bounding box
-                # including its vertices and the rotation handle
-                box = self._selected_box[Box.WITH_HANDLE]
-                if self._value[0] is None or self._value[1] is None:
-                    face_color = 'white'
+        # Only highlight selected shapes that are in view
+        selected_in_view = [
+            i for i in self.selected_data if i in self._indices_view
+        ]
+
+        # Check if hovered shape is in view, otherwise reset it
+        hover_shape = self._value[0]
+        if hover_shape is not None and hover_shape not in self._indices_view:
+            hover_shape = None
+
+        if self._highlight_visible and (
+            len(selected_in_view) > 0 or hover_shape is not None
+        ):
+            if self._mode == Mode.SELECT:
+                # Compute interaction box for visible shapes only
+                # We need to include hover shape if it exists and is selected or if we want to show its highlight?
+                # Actually, if it's just hover highlight, it's handled by outline.
+                # If it's selection, it's handled by selected_in_view.
+
+                selected_box = self.interaction_box(selected_in_view)
+                if selected_box is not None:
+                    # If in select mode just show the interaction bounding box
+                    # including its vertices and the rotation handle
+                    box = selected_box[Box.WITH_HANDLE]
+                    if self._value[0] is None or self._value[1] is None:
+                        face_color = 'white'
+                    else:
+                        face_color = self._highlight_color
+                    edge_color = self._highlight_color
+                    vertices = box[:, ::-1]
+                    # Use a subset of the vertices of the interaction_box to plot
+                    # the line around the edge
+                    pos = box[Box.LINE_HANDLE][:, ::-1]
+                    width = 1.5
                 else:
-                    face_color = self._highlight_color
-                edge_color = self._highlight_color
-                vertices = box[:, ::-1]
-                # Use a subset of the vertices of the interaction_box to plot
-                # the line around the edge
-                pos = box[Box.LINE_HANDLE][:, ::-1]
-                width = 1.5
+                    vertices = np.empty((0, 2))
+                    face_color = 'white'
+                    edge_color = 'white'
+                    pos = None
+                    width = 0
             elif self._mode in (
                 [
                     Mode.DIRECT,
@@ -2636,7 +2697,7 @@ class Shapes(Layer):
                 # If in one of these mode show the vertices of the shape itself
                 inds = np.isin(
                     self._data_view.displayed_vertices_to_shape_num,
-                    list(self.selected_data),
+                    list(selected_in_view),
                 )
                 vertices = self._data_view.displayed_vertices[inds][:, ::-1]
                 # If currently adding path don't show box over last vertex
