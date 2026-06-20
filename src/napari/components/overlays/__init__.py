@@ -11,8 +11,8 @@ from napari.components.overlays.interaction_box import (
     SelectionBoxOverlay,
     TransformBoxOverlay,
 )
-from napari.components.overlays.labels_brush_stroke import (
-    LabelsBrushStrokeOverlay,
+from napari.components.overlays.labels_lasso import (
+    LabelsLassoOverlay,
 )
 from napari.components.overlays.labels_polygon import LabelsPolygonOverlay
 from napari.components.overlays.scale_bar import ScaleBarOverlay
@@ -30,7 +30,7 @@ __all__ = [
     'CanvasOverlay',
     'ColorBarOverlay',
     'CurrentSliceOverlay',
-    'LabelsBrushStrokeOverlay',
+    'LabelsLassoOverlay',
     'LabelsPolygonOverlay',
     'LayerNameOverlay',
     'Overlay',

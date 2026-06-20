@@ -35,6 +35,11 @@ class Mode(StringEnum):
     and updates the labels pixels. If the background label `0` is selected,
     any pixels will be changed to background and this tool functions like an eraser.
     This mode is valid only for 2D images.
+
+    In LASSO mode, click and drag to draw a freehand stroke.
+    When the cursor returns to the starting region, the stroke auto-completes
+    and fills the enclosed area. Press Escape to cancel. This mode is valid
+    only for 2D images.
     """
 
     PAN_ZOOM = auto()
@@ -44,6 +49,7 @@ class Mode(StringEnum):
     FILL = auto()
     ERASE = auto()
     POLYGON = auto()
+    LASSO = auto()
 
 
 class LabelColorMode(StringEnum):

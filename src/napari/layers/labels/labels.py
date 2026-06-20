@@ -293,6 +293,7 @@ class Labels(ScalarFieldBase):
         Mode.FILL: draw,
         Mode.ERASE: draw,
         Mode.POLYGON: no_op,  # the overlay handles mouse events in this mode
+        Mode.LASSO: no_op,  # the overlay handles mouse events in this mode
     }
 
     brush_size_on_mouse_move = BrushSizeOnMouseMove(min_brush_size=1)
@@ -307,6 +308,7 @@ class Labels(ScalarFieldBase):
         Mode.FILL: no_op,
         Mode.ERASE: brush_size_on_mouse_move,
         Mode.POLYGON: no_op,  # the overlay handles mouse events in this mode
+        Mode.LASSO: brush_size_on_mouse_move,  # the overlay handles mouse events in this mode
     }
 
     _cursor_modes: ClassVar[dict[Mode, str]] = {  # type: ignore[assignment]
@@ -317,6 +319,7 @@ class Labels(ScalarFieldBase):
         Mode.FILL: 'cross',
         Mode.ERASE: 'circle',
         Mode.POLYGON: 'cross',
+        Mode.LASSO: 'circle',
     }
 
     _history_limit = 100
@@ -409,8 +412,8 @@ class Labels(ScalarFieldBase):
             show_selected_label=Event,
         )
 
-        from napari.components.overlays.labels_brush_stroke import (
-            LabelsBrushStrokeOverlay,
+        from napari.components.overlays.labels_lasso import (
+            LabelsLassoOverlay,
         )
         from napari.components.overlays.labels_polygon import (
             LabelsPolygonOverlay,
@@ -419,7 +422,7 @@ class Labels(ScalarFieldBase):
         self._overlays.update(
             {
                 'polygon': LabelsPolygonOverlay(visible=True),
-                'brush_stroke': LabelsBrushStrokeOverlay(visible=True),
+                'lasso': LabelsLassoOverlay(visible=True),
             }
         )
 
@@ -837,7 +840,7 @@ class Labels(ScalarFieldBase):
             return mode
 
         self._overlays['polygon'].enabled = mode == Mode.POLYGON
-        self._overlays['brush_stroke'].enabled = mode == Mode.PAINT
+        self._overlays['lasso'].enabled = mode == Mode.LASSO
         if mode in {Mode.PAINT, Mode.ERASE}:
             self.cursor_size = self._calculate_cursor_size()
 
@@ -1275,7 +1278,7 @@ class Labels(ScalarFieldBase):
                 and self.data[tuple(np.round(c).astype(int))] == 0
             ):
                 continue
-            if self._mode in [Mode.PAINT, Mode.ERASE]:
+            if self._mode in [Mode.PAINT, Mode.ERASE, Mode.LASSO]:
                 self.paint(c, new_label, refresh=False)
             elif self._mode == Mode.FILL:
                 self.fill(c, new_label, refresh=False)

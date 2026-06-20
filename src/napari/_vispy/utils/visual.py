@@ -21,8 +21,8 @@ from napari._vispy.overlays.interaction_box import (
     VispySelectionBoxOverlay,
     VispyTransformBoxOverlay,
 )
-from napari._vispy.overlays.labels_brush_stroke import (
-    VispyLabelsBrushStrokeOverlay,
+from napari._vispy.overlays.labels_lasso import (
+    VispyLabelsLassoOverlay,
 )
 from napari._vispy.overlays.labels_polygon import VispyLabelsPolygonOverlay
 from napari._vispy.overlays.scale_bar import VispyScaleBarOverlay
@@ -38,7 +38,7 @@ from napari.components.overlays import (
     BrushCircleOverlay,
     ColorBarOverlay,
     CurrentSliceOverlay,
-    LabelsBrushStrokeOverlay,
+    LabelsLassoOverlay,
     LabelsPolygonOverlay,
     LayerNameOverlay,
     Overlay,
@@ -83,7 +83,7 @@ overlay_to_visual: dict[type[Overlay], type[VispyBaseOverlay]] = {
     SelectionBoxOverlay: VispySelectionBoxOverlay,
     BrushCircleOverlay: VispyBrushCircleOverlay,
     LabelsPolygonOverlay: VispyLabelsPolygonOverlay,
-    LabelsBrushStrokeOverlay: VispyLabelsBrushStrokeOverlay,
+    LabelsLassoOverlay: VispyLabelsLassoOverlay,
     ZoomOverlay: VispyZoomOverlay,
     LayerNameOverlay: VispyLayerNameOverlay,
     CurrentSliceOverlay: VispyCurrentSliceOverlay,

@@ -36,6 +36,7 @@ _default_shortcuts: dict[str, list[KeyCombo | KeyCode]] = {
     'napari:activate_labels_erase_mode': [KeyCode.Digit1, KeyCode.KeyE],
     'napari:activate_labels_paint_mode': [KeyCode.Digit2, KeyCode.KeyP],
     'napari:activate_labels_polygon_mode': [KeyCode.Digit3],
+    'napari:activate_labels_lasso_mode': [KeyCode.Digit8, KeyCode.KeyS],
     'napari:activate_labels_fill_mode': [KeyCode.Digit4, KeyCode.KeyF],
     'napari:activate_labels_picker_mode': [KeyCode.Digit5, KeyCode.KeyL],
     'napari:activate_labels_pan_zoom_mode': [KeyCode.Digit6, KeyCode.KeyZ],

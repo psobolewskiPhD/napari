@@ -65,6 +65,8 @@ class QtLabelsControls(QtLayerControls):
         Button to select PICK mode on Labels layer.
     polygon_button : napari._qt.widgets.qt_mode_button.QtModeRadioButton
         Button to select POLYGON mode on Labels layer.
+    lasso_button : napari._qt.widgets.qt_mode_button.QtModeRadioButton
+        Button to select LASSO mode on Labels layer.
 
     Raises
     ------
@@ -125,15 +127,25 @@ class QtLabelsControls(QtLayerControls):
             True,
             'activate_labels_erase_mode',
         )
+        self.lasso_button = self._radio_button(
+            layer,
+            'labels_lasso',
+            Mode.LASSO,
+            True,
+            'activate_labels_lasso_mode',
+        )
         # don't bind with action manager as this would remove "Toggle with {shortcut}"
         self._on_editable_or_visible_change()
 
-        self.button_grid.addWidget(self.colormap_update, 0, 0)
-        self.button_grid.addWidget(self.erase_button, 0, 1)
-        self.button_grid.addWidget(self.paint_button, 0, 2)
-        self.button_grid.addWidget(self.polygon_button, 0, 3)
-        self.button_grid.addWidget(self.fill_button, 0, 4)
-        self.button_grid.addWidget(self.pick_button, 0, 5)
+        self.button_grid.addWidget(self.colormap_update, 0, 2)
+        self.button_grid.addWidget(self.pick_button, 0, 3)
+        self.button_grid.addWidget(self.panzoom_button, 0, 4)
+        self.button_grid.addWidget(self.transform_button, 0, 5)
+        self.button_grid.addWidget(self.erase_button, 1, 1)
+        self.button_grid.addWidget(self.paint_button, 1, 2)
+        self.button_grid.addWidget(self.polygon_button, 1, 3)
+        self.button_grid.addWidget(self.lasso_button, 1, 4)
+        self.button_grid.addWidget(self.fill_button, 1, 5)
 
         # Setup widgets controls
         self._label_control = QtLabelControl(self, layer)
@@ -192,6 +204,7 @@ class QtLabelsControls(QtLayerControls):
     def _on_editable_or_visible_change(self):
         super()._on_editable_or_visible_change()
         self._set_polygon_tool_state()
+        self._set_lasso_tool_state()
 
     def _on_ndisplay_changed(self):
         show_3d_widgets = self.ndisplay == 3
@@ -205,6 +218,7 @@ class QtLabelsControls(QtLayerControls):
             self._multiscale_level_control._on_display_change_hide()
         self._on_editable_or_visible_change()
         self._set_polygon_tool_state()
+        self._set_lasso_tool_state()
         super()._on_ndisplay_changed()
 
     def _set_polygon_tool_state(self):
@@ -214,6 +228,22 @@ class QtLabelsControls(QtLayerControls):
             )
 
     def _is_polygon_tool_enabled(self):
+        return (
+            self.layer.editable
+            and self.layer.visible
+            and self.layer.n_edit_dimensions == 2
+            and self.ndisplay == 2
+        )
+
+    def _set_lasso_tool_state(self):
+        if hasattr(self, 'lasso_button'):
+            set_widgets_enabled_with_opacity(
+                self,
+                [self.lasso_button],
+                self._is_lasso_tool_enabled(),
+            )
+
+    def _is_lasso_tool_enabled(self):
         return (
             self.layer.editable
             and self.layer.visible

@@ -52,6 +52,11 @@ def activate_labels_polygon_mode(layer: Labels) -> None:
     layer.mode = Mode.POLYGON
 
 
+@register_label_mode_action(trans._('Activate the lasso tool'))
+def activate_labels_lasso_mode(layer: Labels) -> None:
+    layer.mode = Mode.LASSO
+
+
 @register_label_mode_action(trans._('Activate the fill bucket'))
 def activate_labels_fill_mode(layer: Labels) -> None:
     layer.mode = Mode.FILL
@@ -74,6 +79,7 @@ labels_fun_to_mode = [
     (activate_labels_erase_mode, Mode.ERASE),
     (activate_labels_paint_mode, Mode.PAINT),
     (activate_labels_polygon_mode, Mode.POLYGON),
+    (activate_labels_lasso_mode, Mode.LASSO),
     (activate_labels_fill_mode, Mode.FILL),
     (activate_labels_picker_mode, Mode.PICK),
 ]
@@ -182,9 +188,9 @@ def redo(layer: Labels) -> None:
 )
 def reset_polygon(layer: Labels) -> None:
     """Reset the drawing of the current polygon or abort a brush stroke."""
-    brush_stroke = layer._overlays['brush_stroke']
-    if brush_stroke.active:
-        brush_stroke.abort(layer)
+    lasso = layer._overlays['lasso']
+    if lasso.active:
+        lasso.abort(layer)
         return
     layer._overlays['polygon'].points = []
 
