@@ -112,6 +112,47 @@ def test_get_widget_viewer_param_error():
     assert "'widget_name' must be `QtWidgets.QWidget`" in str(e)
 
 
+def test_plugin_widget_window_menu(make_napari_viewer, qtbot, tmp_plugin):
+    """Plugin widgets are listed in the Window menu with a visibility checkmark.
+
+    Opening a plugin widget adds its toggle action to the Window menu, separated
+    from napari's own widgets by a separator. The checkmark tracks visibility,
+    and closing the widget removes its action again.
+    """
+    tmp_plugin.contribute.widget(display_name='Widget')(QWidget_example)
+
+    app = get_app_model()
+    viewer = make_napari_viewer(show=True)
+    (widget_contrib,) = tmp_plugin.manifest.contributions.widgets
+    app.commands.execute_command(widget_contrib.command)
+
+    menu = viewer.window.window_menu
+    full_name = 'Widget (Temp Plugin)'
+    dock_widget = viewer.window._wrapped_dock_widgets[full_name]
+    action = dock_widget.toggleViewAction()
+    qtbot.waitUntil(dock_widget.isVisible)
+
+    # action present in the Window menu, separated from napari's own widgets
+    assert action in menu.actions()
+    separators = [a for a in menu.actions() if a.isSeparator()]
+    assert separators
+    assert menu.actions().index(separators[-1]) < menu.actions().index(action)
+
+    # checkmark reflects visibility
+    assert action.isChecked()
+    dock_widget.hide()
+    qtbot.waitUntil(lambda: not dock_widget.isVisible())
+    assert not action.isChecked()
+    dock_widget.show()
+    qtbot.waitUntil(dock_widget.isVisible)
+    assert action.isChecked()
+
+    # closing the widget removes the action from the menu
+    dock_widget.destroyOnClose()
+    assert full_name not in viewer.window._wrapped_dock_widgets
+    assert action not in menu.actions()
+
+
 def test_widget_hide_destroy(make_napari_viewer, qtbot):
     """Test that widget hide and destroy works."""
     viewer = make_napari_viewer()

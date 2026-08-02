@@ -24,7 +24,9 @@ def test_add_plugin_dock_widget(qtbot):
     with pytest.raises(RuntimeError, match='No current `Viewer` found'):
         _add_plugin_dock_widget((widget, 'widget'))
     _add_plugin_dock_widget((widget, 'widget'), viewer)
-    viewer.window.add_dock_widget.assert_called_with(widget, name='widget')
+    viewer.window.add_dock_widget.assert_called_with(
+        widget, name='widget', menu=viewer.window.window_menu
+    )
 
 
 def test_add_layer_data_tuples_to_viewer_invalid_data():

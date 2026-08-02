@@ -200,7 +200,11 @@ def test_plugin_menu_plugin_state_change(
 def test_plugin_widget_checked(
     make_napari_viewer, qtbot, tmp_plugin: DynamicPlugin
 ):
-    """Check widget toggling/hiding updates check mark correctly."""
+    """The plugins menu checkmark reflects whether the widget is open.
+
+    A widget stays checked when hidden (it is still active) and the check
+    mark is cleared only once the widget is closed.
+    """
 
     @tmp_plugin.contribute.widget(display_name='Widget')
     def widget_contrib():
@@ -220,16 +224,17 @@ def test_plugin_widget_checked(
     assert 'Widget (Temp Plugin)' in viewer.window._wrapped_dock_widgets
     widget = viewer.window._wrapped_dock_widgets['Widget (Temp Plugin)']
 
-    # Hide widget
+    # Hide widget: it remains active, so the check mark stays
     widget.title.hide_button.click()
-    # Run `_on_about_to_show`, which is called on `aboutToShow`` event,
+    # Run `_on_about_to_show`, which is called on `aboutToShow` event,
     # to update checked status
     viewer.window.plugins_menu._on_about_to_show()
-    assert not widget_action.isChecked()
-
-    # Trigger the action again to open widget and test item checked
-    widget_action.trigger()
     assert widget_action.isChecked()
+
+    # Closing the widget removes it, clearing the check mark
+    widget.destroyOnClose()
+    viewer.window.plugins_menu._on_about_to_show()
+    assert not widget_action.isChecked()
 
 
 def test_import_plugin_manager():
