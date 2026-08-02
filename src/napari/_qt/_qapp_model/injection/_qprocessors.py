@@ -39,7 +39,9 @@ def _add_plugin_dock_widget(
             msg='Widgets cannot be opened in headless mode.',
         )
     widget, full_name = widget_name_tuple
-    viewer.window.add_dock_widget(widget, name=full_name)
+    viewer.window.add_dock_widget(
+        widget, name=full_name, menu=viewer.window.window_menu
+    )
 
 
 def _add_layer_data_tuples_to_viewer(

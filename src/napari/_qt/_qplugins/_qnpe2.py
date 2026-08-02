@@ -204,9 +204,9 @@ def _get_current_dock_status(full_name: str) -> bool:
     window = _provide_window_or_raise(
         msg='Note that widgets cannot be opened in headless mode.',
     )
-    if full_name in window._wrapped_dock_widgets:
-        return window._wrapped_dock_widgets[full_name].isVisible()
-    return False
+    # the widget is checked in the Plugins menu while it is open (active),
+    # regardless of whether it is currently visible
+    return full_name in window._wrapped_dock_widgets
 
 
 def _build_widgets_submenu_actions(

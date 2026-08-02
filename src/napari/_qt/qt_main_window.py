@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 
     import numpy as np
     from magicgui.widgets import Widget
-    from qtpy.QtGui import QHideEvent, QImage, QShowEvent
+    from qtpy.QtGui import QAction, QHideEvent, QImage, QShowEvent
 
     from napari.viewer import Viewer
 
@@ -717,6 +717,10 @@ class Window:
         )
         self._unnamed_dockwidget_count = 1
 
+        # Separator between napari's own window menu items and any dock
+        # widgets (e.g. plugin widgets) added to the window menu.
+        self._window_menu_separator: QAction | None = None
+
         self._pref_dialog = None
 
         self._task_status_manager = TaskStatusManager()
@@ -1326,6 +1330,14 @@ class Window:
             if shortcut is not None:
                 action.setShortcut(shortcut)
 
+            if (
+                menu is self.window_menu
+                and self._window_menu_separator is None
+            ):
+                # keep additional dock widgets (e.g. plugin widgets) separate
+                # from napari's own window menu items
+                self._window_menu_separator = menu.addSeparator()
+
             menu.addAction(action)
 
         # see #3663, to fix #3624 more generally
@@ -1378,6 +1390,10 @@ class Window:
         if menu is not None:
             menu.removeAction(_dw.toggleViewAction())
 
+        # Clean up from the window menu, where additional dock widgets
+        # (e.g. plugin widgets) are listed below a separator.
+        self._remove_dock_widget_from_window_menu(_dw)
+
         # Remove dock widget from dictionary
         self._wrapped_dock_widgets.pop(_dw.name, None)
 
@@ -1386,6 +1402,13 @@ class Window:
         # been removed. and anyway: people should be using add_dock_widget
         # rather than directly using _add_viewer_dock_widget
         _dw.deleteLater()
+
+    def _remove_dock_widget_from_window_menu(self, dock_widget) -> None:
+        """Remove a dock widget's toggle action from the window menu."""
+        menu = self.window_menu
+        action = dock_widget.toggleViewAction()
+        if action in menu.actions():
+            menu.removeAction(action)
 
     def add_function_widget(
         self,
