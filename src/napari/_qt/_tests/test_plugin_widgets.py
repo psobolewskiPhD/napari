@@ -117,7 +117,7 @@ def test_plugin_widget_window_menu(make_napari_viewer, qtbot, tmp_plugin):
 
     Opening a plugin widget adds its toggle action to the Window menu, separated
     from napari's own widgets by a separator. The checkmark tracks visibility,
-    and closing the widget removes its action again.
+    and closing the widget removes the action again.
     """
     tmp_plugin.contribute.widget(display_name='Widget')(QWidget_example)
 
@@ -151,6 +151,33 @@ def test_plugin_widget_window_menu(make_napari_viewer, qtbot, tmp_plugin):
     dock_widget.destroyOnClose()
     assert full_name not in viewer.window._wrapped_dock_widgets
     assert action not in menu.actions()
+
+
+def test_plugin_widget_window_menu_separator(make_napari_viewer, tmp_plugin):
+    """The window menu separator is removed once all plugin widgets are closed."""
+    tmp_plugin.contribute.widget(display_name='Widget A')(QWidget_example)
+    tmp_plugin.contribute.widget(display_name='Widget B')(Widg2)
+
+    app = get_app_model()
+    viewer = make_napari_viewer(show=True)
+    for widget_contrib in tmp_plugin.manifest.contributions.widgets:
+        app.commands.execute_command(widget_contrib.command)
+
+    menu = viewer.window.window_menu
+    docks = [
+        viewer.window._wrapped_dock_widgets[name]
+        for name in ('Widget A (Temp Plugin)', 'Widget B (Temp Plugin)')
+    ]
+    actions = [dock.toggleViewAction() for dock in docks]
+
+    # the separator stays while a widget remains, and is removed with the last
+    docks[0].destroyOnClose()
+    assert actions[0] not in menu.actions()
+    assert actions[1] in menu.actions()
+    assert [a for a in menu.actions() if a.isSeparator()]
+    docks[1].destroyOnClose()
+    assert actions[1] not in menu.actions()
+    assert not [a for a in menu.actions() if a.isSeparator()]
 
 
 def test_widget_hide_destroy(make_napari_viewer, qtbot):

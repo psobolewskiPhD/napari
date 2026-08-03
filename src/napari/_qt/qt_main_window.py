@@ -1363,8 +1363,8 @@ class Window:
         widget : QWidget | str
             If widget == 'all', all docked widgets will be removed.
         menu : QMenu, optional
-            Menu bar to remove toggle action from. If `None` nothing removed
-            from menu.
+            Additional menu from which to remove the toggle action. The action
+            is always removed from the window menu when present.
         """
         if widget == 'all':
             for dw in list(self._wrapped_dock_widgets.values()):
@@ -1404,11 +1404,22 @@ class Window:
         _dw.deleteLater()
 
     def _remove_dock_widget_from_window_menu(self, dock_widget) -> None:
-        """Remove a dock widget's toggle action from the window menu."""
+        """Remove a dock widget's toggle action from the window menu.
+
+        Also remove the separator once no more plugin widgets are listed.
+        """
+        if self._window_menu_separator is None:
+            return
         menu = self.window_menu
         action = dock_widget.toggleViewAction()
         if action in menu.actions():
             menu.removeAction(action)
+        if self._window_menu_separator in menu.actions():
+            sep_idx = menu.actions().index(self._window_menu_separator)
+            remaining = menu.actions()[sep_idx + 1 :]
+            if not any(not a.isSeparator() for a in remaining):
+                menu.removeAction(self._window_menu_separator)
+                self._window_menu_separator = None
 
     def add_function_widget(
         self,
