@@ -358,6 +358,14 @@ class QtDims(QWidget):
             self.dims.set_current_step(axis, frame)
 
     def closeEvent(self, event):
+        # Qt fatally aborts if a QThread is destroyed while still running,
+        # and `_animation_thread` is a child of this widget, so a still-
+        # playing animation must be stopped (and joined) before `deleteLater`
+        # can be allowed to destroy it. Guarded on `isRunning()` since this
+        # runs on every viewer close, and the vast majority never played.
+        if self._animation_thread.isRunning():
+            self.stop()
+            self._animation_thread.wait(2000)
         [w.deleteLater() for w in self.slider_widgets]
         self.deleteLater()
         event.accept()
