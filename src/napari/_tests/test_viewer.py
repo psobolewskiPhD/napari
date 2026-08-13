@@ -28,7 +28,11 @@ def _get_provider_actions(type_):
                 superclass
             ).values()
         )
-    return actions
+    # Sort for deterministic parametrize IDs: this feeds
+    # @pytest.mark.parametrize below, and a set of functions iterates in
+    # id()-dependent (process-dependent) order, which desyncs collection
+    # across pytest-xdist worker processes.
+    return sorted(actions, key=lambda action: action.__name__)
 
 
 def _assert_shortcuts_exist_for_each_action(type_):
