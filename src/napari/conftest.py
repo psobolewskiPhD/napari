@@ -298,6 +298,26 @@ def _auto_shutdown_dask_threadworkers():
         dask.threaded.default_pool = None
 
 
+@pytest.fixture(autouse=True)
+def _auto_shutdown_zarr_iothread():
+    """
+    This automatically shuts down zarr's background IO thread and executor.
+
+    Like dask's threadpool above, zarr lazily creates a long-lived background
+    thread (and threadpool executor) for async I/O on first use, and only
+    tears it down at process exit via `atexit`. Left dangling between tests,
+    delayed work on that thread can end up touching objects that a later
+    test has already torn down.
+    """
+    try:
+        yield
+    finally:
+        from zarr.core.sync import cleanup_resources, loop
+
+        if loop[0] is not None:
+            cleanup_resources()
+
+
 # this is not the proper way to configure IPython, but it's an easy one.
 # This will prevent IPython to try to write history on its sql file and do
 # everything in memory.
