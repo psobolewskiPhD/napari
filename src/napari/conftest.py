@@ -765,6 +765,7 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
 
     base_start = QThread.start
     thread_dict = WeakKeyDictionary()
+    request.node.stash[_PENDING_THREADS_KEY] = thread_dict
     base_constructor = QThread.__init__
 
     def run_with_trace(self):  # pragma: no cover
@@ -909,6 +910,63 @@ def _dangling_qthread_pool(monkeypatch, request):
     )
 
 
+# Shared between `_dangling_qtimers`/`_dangling_qthreads` and the
+# `pytest_runtest_teardown` hookimpl below: those fixtures' own finalizers run
+# too late to prevent the crashes they detect. `pytest-qt`'s own
+# `pytest_runtest_teardown` hookimpl pumps the Qt event loop (to flush pending
+# events between tests) and, because it has no `tryfirst`, it runs *before*
+# our fixture finalizers under pluggy's LIFO ordering. Two ways that bites:
+#
+# - A `QTimer.singleShot` from the finished test can still be pending (e.g.
+#   `superqt`'s `WorkerBase.start()` defers submitting a `QRunnable` to
+#   `QThreadPool` by 1ms when called from a running event loop). The pump can
+#   fire it *after* the test's own widgets/objects have already been torn
+#   down, crashing the whole process (`QRunnable::warnNullCallable` -> abort).
+# - A still-running `QThread` (e.g. `AnimationThread` in `qt_dims_slider.py`)
+#   can be a child of a widget with a queued `deleteLater()`. The pump
+#   delivers that deferred deletion, and Qt fatally aborts if a `QThread` is
+#   destroyed while still running.
+#
+# Both are prevented by acting in a `tryfirst` hookimpl, which guarantees we
+# run before any non-tryfirst teardown hookimpl, regardless of fixture
+# teardown order.
+_PENDING_TIMERS_KEY: pytest.StashKey[list] = pytest.StashKey()
+_PENDING_THREADS_KEY: pytest.StashKey[WeakKeyDictionary] = pytest.StashKey()
+
+
+def _stop_thread_early(thread) -> None:
+    """Best-effort graceful stop, used before any event-loop pump can risk
+    destroying `thread` while it's still running (see comment above)."""
+    from qtpy.QtCore import QThread
+
+    stop = getattr(thread, '_stop', None)
+    if stop is None and type(thread).terminate is not QThread.terminate:
+        # an overridden `terminate()` (e.g. StatusChecker's) is a graceful
+        # stop request; the base QThread.terminate() is a dangerous forced
+        # kill, so it's deliberately never called here.
+        stop = thread.terminate
+    if stop is not None:
+        with contextlib.suppress(RuntimeError):
+            stop()
+    with contextlib.suppress(RuntimeError):
+        thread.quit()
+    with contextlib.suppress(RuntimeError):
+        thread.wait(2000)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    for timer, _ in item.stash.get(_PENDING_TIMERS_KEY, []):
+        with contextlib.suppress(RuntimeError):
+            if timer.isActive():
+                timer.stop()
+
+    for thread in list(item.stash.get(_PENDING_THREADS_KEY, {})):
+        with contextlib.suppress(RuntimeError):
+            if thread.isRunning():
+                _stop_thread_early(thread)
+
+
 @pytest.fixture
 def _dangling_qtimers(monkeypatch, request):
     from qtpy.QtCore import QTimer
@@ -916,6 +974,7 @@ def _dangling_qtimers(monkeypatch, request):
     base_start = QTimer.start
     timer_dkt = WeakKeyDictionary()
     single_shot_list = []
+    request.node.stash[_PENDING_TIMERS_KEY] = single_shot_list
 
     if 'disable_qtimer_start' in request.keywords:
         from pytestqt.qt_compat import qt_api
