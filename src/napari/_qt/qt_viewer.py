@@ -620,6 +620,16 @@ class QtViewer(QSplitter):
         """Provide updates on the main thread using the slice response data.
 
         This only gets triggered on the async slicing path.
+
+        Note: this is deliberately fire-and-forget (not
+        `await_return=True`). `Viewer.close()` calls
+        `_layer_slicer.shutdown()`, which blocks the main thread waiting
+        for the slicing thread's executor to finish; making this callback
+        synchronous would deadlock, since the slicing thread would then be
+        waiting for the main thread to process it while the main thread is
+        itself blocked (not pumping events) waiting for the slicing
+        thread. See `Viewer.close()` for how the fire-and-forget queued
+        call is instead flushed before layers are torn down.
         """
         logging.getLogger('napari').debug(
             'QtViewer._on_slice_ready: %s', responses
