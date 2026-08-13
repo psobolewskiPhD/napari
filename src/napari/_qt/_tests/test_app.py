@@ -41,6 +41,12 @@ def test_windows_grouping_overwrite(qapp):
 
 def test_run_outside_ipython(make_napari_viewer, qapp, monkeypatch):
     """Test that we don't incorrectly give ipython the event loop."""
+    # `IPython.get_ipython()` is a process-global singleton shell; an
+    # earlier test in this worker process (e.g. one using the embedded Qt
+    # console) can leave its `active_eventloop` set to 'qt', which this
+    # test would otherwise see. Simulate a plain, non-notebook environment.
+    monkeypatch.setitem(sys.modules, 'IPython', None)
+
     assert not _ipython_has_eventloop()
     v1 = make_napari_viewer()
     assert not _ipython_has_eventloop()
