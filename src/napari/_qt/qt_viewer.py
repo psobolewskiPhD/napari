@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import queue
 import sys
 import traceback
 import warnings
@@ -16,7 +17,14 @@ from typing import (
 from weakref import WeakSet, ref
 
 import numpy as np
-from qtpy.QtCore import QCoreApplication, QObject, Qt, QUrl, Signal
+from qtpy.QtCore import (
+    QCoreApplication,
+    QMetaObject,
+    QObject,
+    Qt,
+    QUrl,
+    Slot,
+)
 from qtpy.QtGui import (
     QGuiApplication,
     QImage,
@@ -151,8 +159,6 @@ class QtViewer(QSplitter):
     """
 
     _instances: ClassVar[WeakSet[QtViewer]] = WeakSet()
-    # Slice responses, passed from the slicing thread to the main thread.
-    _slice_ready = Signal(object)
 
     def __init__(
         self,
@@ -221,8 +227,22 @@ class QtViewer(QSplitter):
         self.setOrientation(Qt.Orientation.Vertical)
         self.addWidget(main_widget)
 
-        self._slice_ready.connect(self._on_slice_ready)
-        self.viewer._layer_slicer.events.ready.connect(self._emit_slice_ready)
+        # `_layer_slicer.events.ready` may be emitted from its background
+        # slicing thread. Constructing a QObject from that thread (which is
+        # what a direct `@ensure_main_thread`-wrapped callback does under
+        # the hood, via a throwaway QObject it creates to hop threads) has
+        # been observed to deadlock against the main thread doing its own
+        # Qt object construction at the same time. `queue.SimpleQueue` is
+        # plain Python and thread-safe with no Qt/GIL interaction beyond
+        # normal refcounting, so the slicing thread only ever touches that;
+        # `QMetaObject.invokeMethod` below targets `self`, which already
+        # exists and belongs to the main thread, so it doesn't construct
+        # anything new on the calling thread either - it's the sanctioned
+        # way to safely notify across threads in Qt.
+        self._slice_ready_events: queue.SimpleQueue[Event] = (
+            queue.SimpleQueue()
+        )
+        self.viewer._layer_slicer.events.ready.connect(self._queue_slice_ready)
 
         self._on_active_change()
         self.viewer.layers.events.inserted.connect(self._update_camera_depth)
@@ -605,32 +625,44 @@ class QtViewer(QSplitter):
             self.dockConsole.setWidget(console)
             console.setParent(self.dockConsole)
 
-    def _emit_slice_ready(self, event: Event) -> None:
-        """Callback connected to `viewer._layer_slicer.events.ready`.
+    def _queue_slice_ready(self, event: Event) -> None:
+        """Connected to `viewer._layer_slicer.events.ready`.
 
-        Pass the slice response data to the main thread via a Qt signal.
-        Do not use ensure_main_theard on Qt object because it creates
-        temporary objects that result in deadlocks on CI.
+        May be called from `_layer_slicer`'s background slicing thread, so
+        this must never construct or otherwise touch a Qt object directly -
+        only plain, thread-safe Python. `QMetaObject.invokeMethod` targets
+        `self`, which already exists on the main thread, so it's safe to
+        call from any thread without constructing anything new here.
         """
-        self._slice_ready.emit(event.value)
+        self._slice_ready_events.put(event)
+        QMetaObject.invokeMethod(
+            self,
+            '_process_slice_ready_events',
+            Qt.ConnectionType.QueuedConnection,
+        )
 
-    def _on_slice_ready(
-        self, responses: dict[weakref.ReferenceType[Layer], Any]
-    ) -> None:
-        """Provide updates on the main thread using the slice response data.
+    @Slot()
+    def _process_slice_ready_events(self) -> None:
+        """Handle any `_layer_slicer.events.ready` events queued by
+        `_queue_slice_ready`. Always runs on the main thread: either invoked
+        there via a queued connection, or called directly from other
+        main-thread-only code (e.g. `Viewer.close()`) to flush the queue
+        immediately.
+        """
+        while True:
+            try:
+                event = self._slice_ready_events.get_nowait()
+            except queue.Empty:
+                return
+            self._on_slice_ready(event)
 
+    def _on_slice_ready(self, event: Event) -> None:
+        """Handles a slice-ready event queued by `_queue_slice_ready`.
+
+        Provides updates after slicing using the slice response data.
         This only gets triggered on the async slicing path.
-
-        Note: this is deliberately fire-and-forget (not
-        `await_return=True`). `Viewer.close()` calls
-        `_layer_slicer.shutdown()`, which blocks the main thread waiting
-        for the slicing thread's executor to finish; making this callback
-        synchronous would deadlock, since the slicing thread would then be
-        waiting for the main thread to process it while the main thread is
-        itself blocked (not pumping events) waiting for the slicing
-        thread. See `Viewer.close()` for how the fire-and-forget queued
-        call is instead flushed before layers are torn down.
         """
+        responses: dict[weakref.ReferenceType[Layer], Any] = event.value
         logging.getLogger('napari').debug(
             'QtViewer._on_slice_ready: %s', responses
         )
@@ -1373,6 +1405,11 @@ class QtViewer(QSplitter):
         event : qtpy.QtCore.QCloseEvent
             Event from the Qt context.
         """
+        # Flush any already-queued slice-ready events (see
+        # `_queue_slice_ready`/`_process_slice_ready_events`) while layers
+        # are still valid.
+        self._process_slice_ready_events()
+
         if self._layers is not None:
             # do not create layerlist if it does not exist yet.
             self.layers.close()
