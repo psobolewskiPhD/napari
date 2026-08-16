@@ -35,6 +35,7 @@ import contextlib
 import os
 import sys
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from datetime import timedelta
@@ -286,8 +287,16 @@ def _auto_shutdown_dask_threadworkers():
     We don't assert the number of threads in unchanged as other things
     modify the number of threads.
     """
-    # Reset pool regardless of initial state (handles xdist case)
+    # This fixture's own `finally` below always resets the pool, so a
+    # leftover one here means a previous test leaked it. Reset defensively
+    # so that leak doesn't cascade into failures across the rest of an
+    # xdist worker's tests, but warn so the leak itself is still visible.
     if dask.threaded.default_pool is not None:
+        warnings.warn(
+            'dask.threaded.default_pool was not None at test start '
+            '(a previous test likely leaked it); resetting.',
+            stacklevel=2,
+        )
         if isinstance(dask.threaded.default_pool, ThreadPool):
             dask.threaded.default_pool.close()
             dask.threaded.default_pool.join()
