@@ -268,15 +268,16 @@ class Viewer(ViewerModel):
         # Shutdown the slicer first to avoid processing any more tasks.
         self._layer_slicer.shutdown()
         # `shutdown()` only waits for in-flight slicing computations to
-        # finish; the main-thread callback each one schedules via
-        # `ensure_main_thread` (see `QtViewer._on_slice_ready`) is queued
-        # separately and fire-and-forget, so it can still be pending here.
-        # Flush it now, while layers are still valid, rather than let it
-        # fire later against layers this method is about to clear.
-        from qtpy.QtCore import QCoreApplication
-
-        if (app := QCoreApplication.instance()) is not None:
-            app.processEvents()
+        # finish; the completion callback each one queues (see
+        # `QtViewer._queue_slice_ready`/`_process_slice_ready_events`) is
+        # only drained when that queued call reaches the main thread, so it
+        # can still be pending here. Flush it now, while layers are still
+        # valid, rather than let it fire later against layers this method
+        # is about to clear.
+        qt_window = getattr(self.window, '_qt_window', None)
+        qt_viewer = getattr(qt_window, '_qt_viewer', None)
+        if qt_viewer is not None:
+            qt_viewer._process_slice_ready_events()
         # Disconnect changes to dims before removing layers one-by-one
         # to avoid any unnecessary slicing.
         disconnect_events(self.dims.events, self)
