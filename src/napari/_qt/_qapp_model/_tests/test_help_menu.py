@@ -134,6 +134,8 @@ def test_tour_escape_closes_regardless_of_focus(qtbot):
     qtbot.addWidget(window)
     window.resize(640, 480)
     window.show()
+    window.activateWindow()
+    qtbot.waitActive(window)
 
     other_widget = QWidget(window)
     other_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
