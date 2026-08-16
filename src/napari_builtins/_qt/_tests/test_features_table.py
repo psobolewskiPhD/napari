@@ -1,5 +1,3 @@
-from unittest.mock import MagicMock
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -231,7 +229,7 @@ def test_features_table_save_csv(qtbot, tmp_path, monkeypatch):
 
     path = tmp_path / 'test.csv'
     monkeypatch.setattr(
-        QFileDialog, 'getSaveFileName', MagicMock(return_value=(path, None))
+        QFileDialog, 'getSaveFileName', lambda *a, **k: (path, None)
     )
 
     w.save.click()
@@ -617,7 +615,7 @@ def test_features_table_multilayer_save_csv(qtbot, tmp_path, monkeypatch):
 
     path = tmp_path / 'test2.csv'
     monkeypatch.setattr(
-        QFileDialog, 'getSaveFileName', MagicMock(return_value=(path, None))
+        QFileDialog, 'getSaveFileName', lambda *a, **k: (path, None)
     )
 
     w.save.click()
