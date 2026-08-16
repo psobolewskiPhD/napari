@@ -649,13 +649,27 @@ class QtViewer(QSplitter):
         there via a queued connection, or called directly from other
         main-thread-only code (e.g. `Viewer.close()`) to flush the queue
         immediately.
+
+        `_on_slice_ready` is called directly here rather than through
+        `EventEmitter._invoke_callback`, which is what normally isolates a
+        callback's exceptions so one bad event can't take down the emitter.
+        `Viewer.close()`/`closeEvent` call this method directly to flush the
+        queue before tearing down, so an uncaught exception here would abort
+        the rest of their cleanup - exactly the kind of skipped teardown
+        that can itself cause a segfault. Mirror `_invoke_callback`'s
+        handling instead of letting it propagate.
         """
         while True:
             try:
                 event = self._slice_ready_events.get_nowait()
             except queue.Empty:
                 return
-            self._on_slice_ready(event)
+            try:
+                self._on_slice_ready(event)
+            except Exception:
+                logging.getLogger('napari').exception(
+                    'Error handling slice-ready event: %s', event
+                )
 
     def _on_slice_ready(self, event: Event) -> None:
         """Handles a slice-ready event queued by `_queue_slice_ready`.
