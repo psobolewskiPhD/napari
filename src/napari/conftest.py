@@ -1258,7 +1258,24 @@ def _short_repr(obj, limit=200):
 
 
 @pytest.fixture
-def _find_dangling_widgets(request, qtbot):
+def _find_dangling_widgets(request, qtbot, monkeypatch):
+    # `gc.get_referrers()` below only walks one level, so a widget kept
+    # alive by an indirect referrer (e.g. captured in a mock's call args)
+    # can show up with no apparent referrer at all. Record where every
+    # QWidget was constructed as a fallback, mirroring how
+    # `_dangling_qthreads`/`_dangling_qtimers`/`_dangling_qthread_pool`
+    # already track their resource's calling place.
+    from qtpy.QtWidgets import QWidget
+
+    creation_places: WeakKeyDictionary = WeakKeyDictionary()
+    base_init = QWidget.__init__
+
+    def init_with_tracking(self, *args, **kwargs):
+        base_init(self, *args, **kwargs)
+        creation_places[self] = _get_calling_place()
+
+    monkeypatch.setattr(QWidget, '__init__', init_with_tracking)
+
     yield
 
     from qtpy.QtWidgets import QApplication
@@ -1299,6 +1316,9 @@ def _find_dangling_widgets(request, qtbot):
         for widget in problematic_widgets:
             lines.append(
                 f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
+            )
+            lines.append(
+                f'  created at: {creation_places.get(widget, "<unknown - constructed before this fixture was active>")}'
             )
             for ref in gc.get_referrers(widget):
                 if (
