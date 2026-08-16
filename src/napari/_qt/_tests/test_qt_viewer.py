@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import os
 import typing
+from contextlib import suppress
 from itertools import product, takewhile
 from math import isclose
 from unittest import mock
@@ -11,6 +12,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 from imageio import imread
+from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 from pytestqt.qtbot import QtBot
 from qtpy.QtCore import QEvent, QPointF
 from qtpy.QtGui import QEnterEvent
@@ -757,14 +759,31 @@ def _update_data(
     layer.data = np.full((2, 2), label, dtype=dtype)
     layer.selected_label = label
 
-    qtbot.wait(50)  # wait for .update() to be called on QtColorBox from Qt
+    colorbox = qt_viewer.controls.widgets[layer]._label_control.colorbox
+    captured = {}
 
-    color_box_color = qt_viewer.controls.widgets[
-        layer
-    ]._label_control.colorbox.color
-    screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
-    shape = np.array(screenshot.shape[:2])
-    middle_pixel = screenshot[tuple(shape // 2)]
+    def _colorbox_matches_screenshot() -> bool:
+        screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
+        shape = np.array(screenshot.shape[:2])
+        captured['color_box_color'] = colorbox.color
+        captured['middle_pixel'] = screenshot[tuple(shape // 2)]
+        if captured['color_box_color'] is None:
+            return False
+        return np.allclose(
+            captured['color_box_color'], captured['middle_pixel'], atol=1
+        )
+
+    # A fixed sleep here used to be enough for Qt to process the
+    # QtColorBox update and the canvas repaint before the screenshot, but
+    # under CPU contention (e.g. parallel xdist workers) that's no longer
+    # a safe assumption. Poll for the two to actually agree instead; on a
+    # genuine mismatch this still falls through to the assertions below
+    # for a clear diagnostic rather than raising a bare timeout.
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_colorbox_matches_screenshot, timeout=2000)
+
+    color_box_color = captured['color_box_color']
+    middle_pixel = captured['middle_pixel']
 
     return color_box_color, middle_pixel
 
