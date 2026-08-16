@@ -324,9 +324,15 @@ class QtDims(QWidget):
 
     @Slot()
     def stop(self) -> None:
-        """Stop axis animation and wait for its thread to finish."""
+        """Stop axis animation and wait (bounded) for its thread to finish.
+
+        `stop()` is called from frequent UI-update paths (`_update_display`,
+        `_update_nsliders`), not just teardown, so an unbounded `wait()`
+        here would turn any contention-driven delay in the animation thread
+        into an indefinite stall across all of those call sites.
+        """
         self._animation_thread._stop()
-        self._animation_thread.wait()
+        self._animation_thread.wait(2000)
 
     @property
     def is_playing(self):
@@ -365,7 +371,6 @@ class QtDims(QWidget):
         # runs on every viewer close, and the vast majority never played.
         if self._animation_thread.isRunning():
             self.stop()
-            self._animation_thread.wait(2000)
         [w.deleteLater() for w in self.slider_widgets]
         self.deleteLater()
         event.accept()
