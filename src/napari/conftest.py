@@ -32,6 +32,7 @@ Notes for using the plugin-related fixtures here:
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import sys
 import threading
@@ -1245,6 +1246,17 @@ with contextlib.suppress(ImportError):
         )
 
 
+def _short_repr(obj, limit=200):
+    """repr() an arbitrary gc referrer without risking a crash/huge dump."""
+    try:
+        text = repr(obj)
+    except Exception as e:  # noqa: BLE001
+        return f'<{type(obj)!r}, repr failed: {e!r}>'
+    return f'{type(obj)!r}: {text[:limit]}' + (
+        '...' if len(text) > limit else ''
+    )
+
+
 @pytest.fixture
 def _find_dangling_widgets(request, qtbot):
     yield
@@ -1283,10 +1295,22 @@ def _find_dangling_widgets(request, qtbot):
         problematic_widgets.append(widget)
 
     if problematic_widgets:
-        text = '\n'.join(
-            f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
-            for widget in problematic_widgets
-        )
+        lines = []
+        for widget in problematic_widgets:
+            lines.append(
+                f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
+            )
+            for ref in gc.get_referrers(widget):
+                if (
+                    ref is problematic_widgets
+                    or ref is top_level_widgets
+                    # this fixture's own paused generator frame always
+                    # shows up (`widget` is one of its locals) - not signal
+                    or type(ref).__name__ == 'generator'
+                ):
+                    continue
+                lines.append(f'  referrer: {_short_repr(ref)}')
+        text = '\n'.join(lines)
 
         for widget in problematic_widgets:
             widget.setObjectName('handled_widget')
