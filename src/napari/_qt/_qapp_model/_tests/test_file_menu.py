@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 from app_model.types import MenuItem, SubmenuItem
 from npe2.manifest.contributions import SampleDataURI
-from qtpy.QtGui import QGuiApplication
+from qtpy.QtCore import QMimeData
+from qtpy.QtGui import QGuiApplication, QImage
 from qtpy.QtWidgets import QApplication
 
 from napari._app_model import get_app_model
@@ -193,14 +194,34 @@ def test_show_shortcuts_actions(make_napari_viewer):
     viewer.window._pref_dialog.close()
 
 
-def test_image_from_clipboard(make_napari_viewer):
+def test_image_from_clipboard(make_napari_viewer, monkeypatch):
     make_napari_viewer()
     app = get_app_model()
 
-    # Ensure clipboard is empty
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
+    # The clipboard is a single resource shared by every process on the
+    # display, so `clear()` here does not mean it stays empty: under
+    # pytest-xdist another worker can take ownership of it at any moment, and
+    # `test_qaction_layer.py` does exactly that, putting JSON text on it. That
+    # makes `mime.hasText()` true, and `_image_from_clipboard` then emits an
+    # extra 'trying to parse text in clipboard as a link' message before the
+    # one asserted below - seen on CI as "Expected 'show_info' to be called
+    # once. Called 2 times."
+    #
+    # This test is about what the command does when the clipboard holds
+    # nothing useful, so supply exactly that instead of asking the display for
+    # it. A plain class rather than a Mock: patching a method of a QObject
+    # subclass with a Mock upsets PySide6's metaobject introspection.
+    class _EmptyClipboard:
+        def mimeData(self):
+            return QMimeData()
+
+        def image(self):
+            return QImage()
+
+    monkeypatch.setattr(
+        QGuiApplication, 'clipboard', lambda *_: _EmptyClipboard()
+    )
+    assert QGuiApplication.clipboard().image().isNull()
 
     # Check action command execution
     with mock.patch('napari._qt.qt_viewer.show_info') as mock_show_info:
