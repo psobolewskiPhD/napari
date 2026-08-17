@@ -404,13 +404,26 @@ def test_screenshot(make_napari_viewer, qapp, qtbot):
     qtbot.wait(5)
     qapp.processEvents()
 
-    screenshot2 = viewer.window.screenshot(flash=False, canvas_only=True)
+    result = {}
 
-    qapp.processEvents()
+    def _capture_pair_agrees() -> bool:
+        result['screenshot2'] = viewer.window.screenshot(
+            flash=False, canvas_only=True
+        )
+        with pytest.warns(FutureWarning, match='qt_viewer'):
+            result['screenshot1'] = viewer.window.qt_viewer.screenshot(
+                flash=False
+            )
+        return result['screenshot1'].shape == result['screenshot2'].shape
 
-    # Take screenshot
-    with pytest.warns(FutureWarning, match='qt_viewer'):
-        screenshot1 = viewer.window.qt_viewer.screenshot(flash=False)
+    # A fixed settle time before the first capture isn't enough: under
+    # xdist's window-manager contention on a shared display, a resize can
+    # still land in the gap between the two screenshots (canvas_only vs.
+    # whole-qt_viewer), producing shape-mismatched arrays. Retry the pair
+    # instead of guessing a longer fixed wait.
+    qtbot.waitUntil(_capture_pair_agrees, timeout=3000)
+    screenshot1 = result['screenshot1']
+    screenshot2 = result['screenshot2']
 
     npt.assert_array_equal(screenshot1, screenshot2)
     assert screenshot1.ndim == 3
