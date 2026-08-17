@@ -458,9 +458,14 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
     # ensure the flash effect is applied
     assert viewer.window._qt_viewer.graphicsEffect() is not None
     assert hasattr(viewer.window._qt_viewer, '_flash_animation')
-    qtbot.wait(500)  # wait for the animation to finish
+    # Wait for the animation to finish. We cannot wait on its `finished`
+    # signal, as `remove_flash_animation` may already have deleted
+    # `_flash_animation` by the time we look - so poll for the removal
+    # itself, matching `test_screenshot` in `napari/_tests/test_viewer.py`.
+    qtbot.waitUntil(
+        lambda: not hasattr(viewer.window._qt_viewer, '_flash_animation')
+    )
     assert viewer.window._qt_viewer.graphicsEffect() is None
-    assert not hasattr(viewer.window._qt_viewer, '_flash_animation')
 
     # clear clipboard and grab image from application view
     QGuiApplication.clipboard().clear()
@@ -484,9 +489,10 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
     # ensure the flash effect is applied
     assert viewer.window._qt_window.graphicsEffect() is not None
     assert hasattr(viewer.window._qt_window, '_flash_animation')
-    qtbot.wait(500)  # wait for the animation to finish
+    qtbot.waitUntil(
+        lambda: not hasattr(viewer.window._qt_window, '_flash_animation')
+    )
     assert viewer.window._qt_window.graphicsEffect() is None
-    assert not hasattr(viewer.window._qt_window, '_flash_animation')
 
 
 @skip_on_win_ci
