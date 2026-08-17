@@ -13,6 +13,7 @@ from napari._qt.dialogs.preferences_dialog import (
     PreferencesDialog,
     QMessageBox,
 )
+from napari._qt.widgets.qt_keyboard_settings import EditorWidget
 from napari._tests.utils import skip_local_focus, skip_on_mac_ci
 from napari._vendor.qt_json_builder.qt_jsonschema_form.widgets import (
     EnumSchemaWidget,
@@ -375,6 +376,10 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
     # ensure the dialog is showing
     pref.show()
     qtbot.waitExposed(pref)
+    # Under parallel xdist workers sharing one display, another worker's
+    # window can win OS-level activation right after this one gets it.
+    pref.activateWindow()
+    qtbot.waitActive(pref)
     assert pref.isVisible()
     # 12 is the row for 'napari:toggle_selected_visibility'
     shortcut = shortcut_widget._table.item(
@@ -389,20 +394,40 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
     y = shortcut_widget._table.rowViewportPosition(12)
 
     item_pos = QPoint(x, y)
-    qtbot.mouseClick(
-        shortcut_widget._table.viewport(),
-        Qt.MouseButton.LeftButton,
-        pos=item_pos,
+    model_index = shortcut_widget._table.model().index(
+        12, shortcut_widget._shortcut_col
     )
-    qtbot.mouseDClick(
-        shortcut_widget._table.viewport(),
-        Qt.MouseButton.LeftButton,
-        pos=item_pos,
-    )
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is not None)
+
+    def _open_editor() -> bool:
+        # Under parallel xdist workers, another worker's window can steal
+        # OS-level activation right as we click, so a single attempt isn't
+        # reliable - reassert activation and retry on every poll. Once an
+        # editor already exists, just refocus it instead of clicking again:
+        # a stray click/double-click on a *live* QLineEdit editor moves the
+        # cursor or selects text rather than reopening it, corrupting the
+        # in-progress edit.
+        pref.activateWindow()
+        existing_editor = shortcut_widget._table.indexWidget(model_index)
+        if isinstance(existing_editor, EditorWidget):
+            existing_editor.setFocus()
+        else:
+            qtbot.mouseClick(
+                shortcut_widget._table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=item_pos,
+            )
+            qtbot.mouseDClick(
+                shortcut_widget._table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=item_pos,
+            )
+        return isinstance(QApplication.focusWidget(), EditorWidget)
+
+    # wait for the cell editor itself (not just any widget) to take focus
+    qtbot.waitUntil(_open_editor)
 
     editor = QApplication.focusWidget()
-    assert editor is not None
+    assert editor.text() == 'U'
     # Send a ShortcutOverride event to trigger Delete handling,
     # which clears the selected shortcut text
     delete_event = QKeyEvent(
@@ -411,9 +436,15 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(editor, delete_event)
-    qtbot.wait(100)
+    assert editor.text() == ''
 
-    # Confirm the change with the given key
+    # Confirm the change with the given key.
+    # Both sends are synchronous, so the event loop must not spin in between:
+    # if the dialog window loses activation (which happens on the shared
+    # display when tests run in parallel), Qt's item delegate event filter
+    # commits and closes the editor on focus out, deleting it via
+    # `deleteLater()`. Spinning the event loop here would run that deletion
+    # and leave `editor` a dangling C++ object.
     confirm_key_map = {
         'enter': Qt.Key.Key_Enter,
         'return': Qt.Key.Key_Return,
