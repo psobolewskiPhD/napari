@@ -1335,6 +1335,15 @@ def _find_dangling_widgets(request, qtbot, monkeypatch):
         for widget in problematic_widgets:
             widget.setObjectName('handled_widget')
 
+        # The exception raised below keeps this frame alive via its
+        # traceback for as long as the exception itself is retained (e.g.
+        # by pytest's own reporting for the final summary) - without
+        # clearing these first, every widget referenced here (top_level_
+        # widgets alone can be everything QApplication.topLevelWidgets()
+        # currently returns) would stay alive for the rest of the worker's
+        # session, cascading into every later test's own dangling-widget
+        # check regardless of whether that test leaked anything itself.
+        top_level_widgets = problematic_widgets = widget = None
         raise RuntimeError(f'Found dangling widgets:\n{text}')
 
 
