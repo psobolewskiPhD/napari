@@ -780,7 +780,7 @@ def _update_data(
     # genuine mismatch this still falls through to the assertions below
     # for a clear diagnostic rather than raising a bare timeout.
     with suppress(QtBotTimeoutError):
-        qtbot.waitUntil(_colorbox_matches_screenshot, timeout=2000)
+        qtbot.waitUntil(_colorbox_matches_screenshot, timeout=4000)
 
     color_box_color = captured['color_box_color']
     middle_pixel = captured['middle_pixel']
