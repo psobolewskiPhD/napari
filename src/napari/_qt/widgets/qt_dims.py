@@ -11,6 +11,11 @@ from napari._qt.widgets.qt_dims_slider import (
 from napari.components.dims import Dims
 from napari.settings._constants import LoopMode
 
+#: How long `QtDims.stop()` waits for the animation thread to finish. Bounded
+#: because `stop()` is also called from ordinary UI-update paths, where an
+#: unbounded wait would stall the GUI.
+_ANIMATION_STOP_TIMEOUT_MS = 2000
+
 
 class QtDims(QWidget):
     """Qt view for the napari Dims model.
@@ -323,16 +328,23 @@ class QtDims(QWidget):
             warnings.warn('Refusing to play a hidden axis')
 
     @Slot()
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Stop axis animation and wait (bounded) for its thread to finish.
 
         `stop()` is called from frequent UI-update paths (`_update_display`,
         `_update_nsliders`), not just teardown, so an unbounded `wait()`
         here would turn any contention-driven delay in the animation thread
         into an indefinite stall across all of those call sites.
+
+        Returns
+        -------
+        bool
+            Whether the animation thread actually finished. Callers that are
+            about to let the thread be destroyed must check this: Qt aborts
+            when a running QThread is destroyed.
         """
         self._animation_thread._stop()
-        self._animation_thread.wait(2000)
+        return self._animation_thread.wait(_ANIMATION_STOP_TIMEOUT_MS)
 
     @property
     def is_playing(self):
@@ -369,8 +381,18 @@ class QtDims(QWidget):
         # playing animation must be stopped (and joined) before `deleteLater`
         # can be allowed to destroy it. Guarded on `isRunning()` since this
         # runs on every viewer close, and the vast majority never played.
-        if self._animation_thread.isRunning():
-            self.stop()
+        if self._animation_thread.isRunning() and not self.stop():
+            # `stop()`'s wait is bounded, so it can return with the thread
+            # still running. Proceeding to `deleteLater()` would then abort
+            # the process, and silently - so say what happened first.
+            warnings.warn(
+                'Axis animation thread did not stop within '
+                f'{_ANIMATION_STOP_TIMEOUT_MS}ms of being asked to; closing '
+                'anyway. If the process aborts immediately after this, that '
+                'is why.',
+                RuntimeWarning,
+                stacklevel=2,
+            )
         [w.deleteLater() for w in self.slider_widgets]
         self.deleteLater()
         event.accept()
