@@ -1307,33 +1307,29 @@ def _short_repr(obj, limit=200):
     )
 
 
-@pytest.fixture
-def _find_dangling_widgets(request, qtbot, monkeypatch):
-    # `gc.get_referrers()` below only walks one level, so a widget kept
-    # alive by an indirect referrer (e.g. captured in a mock's call args)
-    # can show up with no apparent referrer at all. Record where every
-    # QWidget was constructed as a fallback, mirroring how
-    # `_dangling_qthreads`/`_dangling_qtimers`/`_dangling_qthread_pool`
-    # already track their resource's calling place.
-    from qtpy.QtWidgets import QWidget
+def _describe_dangling_widgets(request, creation_places) -> str:
+    """Return a description of leaked top-level widgets, or '' if there are none.
 
-    creation_places: WeakKeyDictionary = WeakKeyDictionary()
-    base_init = QWidget.__init__
+    Every widget reference lives in *this* function's frame, and this function
+    has returned by the time `_find_dangling_widgets` raises - so none of them
+    can be reachable from the resulting exception's traceback. That matters:
+    the exception is retained for the whole session (pytest_pretty's
+    CustomTerminalReporter holds failure reports to build its final summary
+    table), so a frame in its traceback holding `QApplication.topLevelWidgets()`
+    pins every Qt top-level widget that existed at the first failure. Those
+    then show up as "dangling" in every later test in the worker, whether or
+    not that test leaked anything - see the CI failure that motivated this,
+    where four unrelated tests all reported the same _QtMainWindow.
 
-    def init_with_tracking(self, *args, **kwargs):
-        base_init(self, *args, **kwargs)
-        creation_places[self] = _get_calling_place()
-
-    monkeypatch.setattr(QWidget, '__init__', init_with_tracking)
-
-    yield
-
+    Keep widget references out of `_find_dangling_widgets` itself rather than
+    clearing locals by hand there; a returned frame cannot be re-entered, so
+    this stays correct as the code changes.
+    """
     from qtpy.QtWidgets import QApplication
 
     from napari._qt.qt_main_window import _QtMainWindow
 
     top_level_widgets = QApplication.topLevelWidgets()
-
     viewer_weak_set = getattr(request.node, '_viewer_weak_set', set())
 
     problematic_widgets = []
@@ -1361,39 +1357,59 @@ def _find_dangling_widgets(request, qtbot, monkeypatch):
 
         problematic_widgets.append(widget)
 
-    if problematic_widgets:
-        lines = []
-        for widget in problematic_widgets:
-            lines.append(
-                f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
-            )
-            lines.append(
-                f'  created at: {creation_places.get(widget, "<unknown - constructed before this fixture was active>")}'
-            )
-            for ref in gc.get_referrers(widget):
-                if (
-                    ref is problematic_widgets
-                    or ref is top_level_widgets
-                    # this fixture's own paused generator frame always
-                    # shows up (`widget` is one of its locals) - not signal
-                    or type(ref).__name__ == 'generator'
-                ):
-                    continue
-                lines.append(f'  referrer: {_short_repr(ref)}')
-        text = '\n'.join(lines)
+    if not problematic_widgets:
+        return ''
 
-        for widget in problematic_widgets:
-            widget.setObjectName('handled_widget')
+    lines = []
+    for widget in problematic_widgets:
+        lines.append(
+            f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
+        )
+        lines.append(
+            f'  created at: {creation_places.get(widget, "<unknown - constructed before this fixture was active>")}'
+        )
+        for ref in gc.get_referrers(widget):
+            if (
+                ref is problematic_widgets
+                or ref is top_level_widgets
+                # this function's own frame shows up while it is running
+                # (`widget` is one of its locals) - not signal
+                or type(ref).__name__ == 'frame'
+            ):
+                continue
+            lines.append(f'  referrer: {_short_repr(ref)}')
 
-        # The exception raised below keeps this frame alive via its
-        # traceback for as long as the exception itself is retained (e.g.
-        # by pytest's own reporting for the final summary) - without
-        # clearing these first, every widget referenced here (top_level_
-        # widgets alone can be everything QApplication.topLevelWidgets()
-        # currently returns) would stay alive for the rest of the worker's
-        # session, cascading into every later test's own dangling-widget
-        # check regardless of whether that test leaked anything itself.
-        top_level_widgets = problematic_widgets = widget = None
+    for widget in problematic_widgets:
+        widget.setObjectName('handled_widget')
+
+    return '\n'.join(lines)
+
+
+@pytest.fixture
+def _find_dangling_widgets(request, qtbot, monkeypatch):
+    # `gc.get_referrers()` only walks one level, so a widget kept alive by an
+    # indirect referrer (e.g. captured in a mock's call args) can show up with
+    # no apparent referrer at all. Record where every QWidget was constructed
+    # as a fallback, mirroring how
+    # `_dangling_qthreads`/`_dangling_qtimers`/`_dangling_qthread_pool`
+    # already track their resource's calling place.
+    from qtpy.QtWidgets import QWidget
+
+    creation_places: WeakKeyDictionary = WeakKeyDictionary()
+    base_init = QWidget.__init__
+
+    def init_with_tracking(self, *args, **kwargs):
+        base_init(self, *args, **kwargs)
+        creation_places[self] = _get_calling_place()
+
+    monkeypatch.setattr(QWidget, '__init__', init_with_tracking)
+
+    yield
+
+    # No widget may be referenced from this frame: see
+    # `_describe_dangling_widgets` for why.
+    text = _describe_dangling_widgets(request, creation_places)
+    if text:
         raise RuntimeError(f'Found dangling widgets:\n{text}')
 
 
