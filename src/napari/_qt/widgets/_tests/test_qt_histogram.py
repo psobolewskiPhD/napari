@@ -572,6 +572,12 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
         lambda: not hist._compute_scheduled and not hist._dirty,
         timeout=15000,
     )
+    # _compute_scheduled/_dirty are set directly by the worker thread as
+    # soon as the generator exhausts, which can race ahead of the main
+    # thread actually dispatching the queued per-chunk `yielded` signals
+    # that drive set_data. Give the event loop a moment to catch up on
+    # any still-queued deliveries before counting draws.
+    qtbot.wait(50)
 
     # Both views animated progressively from the single worker's chunks.
     assert draws['a'] > 1
