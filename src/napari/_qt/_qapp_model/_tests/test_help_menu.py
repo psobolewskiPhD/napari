@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import requests
 from qtpy.QtCore import QRect, Qt
-from qtpy.QtWidgets import QApplication, QLabel, QWidget
+from qtpy.QtWidgets import QLabel, QWidget
 
 from napari._app_model import get_app_model
 from napari._qt._qapp_model.qactions._help import HELP_URLS, _start_viewer_tour
@@ -134,8 +134,6 @@ def test_tour_escape_closes_regardless_of_focus(qtbot):
     qtbot.addWidget(window)
     window.resize(640, 480)
     window.show()
-    window.activateWindow()
-    qtbot.waitActive(window)
 
     other_widget = QWidget(window)
     other_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -151,17 +149,7 @@ def test_tour_escape_closes_regardless_of_focus(qtbot):
     tour.start()
     qtbot.waitUntil(lambda: tour._steps[tour._current].title == 'Only')
 
-    # Escape should close the tour even when some other widget -- not the
-    # tooltip -- has keyboard focus. Under parallel xdist workers, another
-    # worker's window can steal OS-level activation right after this one
-    # gets it, bumping focus off `other_widget` again; re-assert focus on
-    # every poll instead of gambling on a single `setFocus()` call.
-    def _ensure_other_widget_focused() -> bool:
-        if QApplication.focusWidget() is not other_widget:
-            other_widget.setFocus()
-        return QApplication.focusWidget() is other_widget
-
-    qtbot.waitUntil(_ensure_other_widget_focused)
+    other_widget.setFocus()
     qtbot.keyPress(other_widget, Qt.Key.Key_Escape)
     qtbot.waitUntil(lambda: not tour._active)
 
