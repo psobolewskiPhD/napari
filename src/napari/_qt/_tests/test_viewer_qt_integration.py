@@ -14,7 +14,11 @@ from qtpy.QtGui import QEnterEvent, QGuiApplication, QKeyEvent
 from qtpy.QtWidgets import QApplication
 
 from napari._qt._tests.test_qt_viewer import qt_viewer
-from napari._tests.utils import skip_local_popups, skip_on_win_ci
+from napari._tests.utils import (
+    skip_local_popups,
+    skip_on_mac_xdist,
+    skip_on_win_ci,
+)
 from napari.settings import get_settings
 from napari.utils.action_manager import action_manager
 from napari.utils.theme import available_themes
@@ -325,6 +329,7 @@ def test_qt_viewer_toggle_console(make_napari_viewer):
 
 
 @skip_local_popups
+@skip_on_mac_xdist
 @pytest.mark.skipif(os.environ.get('MIN_REQ', '0') == '1', reason='min req')
 def test_qt_viewer_console_focus(qtbot, make_napari_viewer):
     """Test console has focus when instantiating from viewer."""
