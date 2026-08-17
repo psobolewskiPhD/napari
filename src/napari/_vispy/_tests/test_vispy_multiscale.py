@@ -43,7 +43,9 @@ def test_multiscale(make_napari_viewer):
 
 @skip_on_win_ci
 @skip_local_popups
-def test_multiscale_zoom_in_within_level_does_not_refresh(make_napari_viewer):
+def test_multiscale_zoom_in_within_level_does_not_refresh(
+    make_napari_viewer, qtbot
+):
     """Ensure zooming in within the same level does not trigger a refresh."""
     viewer = make_napari_viewer(show=True)
     view = viewer.window._qt_viewer
@@ -64,6 +66,13 @@ def test_multiscale_zoom_in_within_level_does_not_refresh(make_napari_viewer):
 
     assert layer.data_level == 0
     np.testing.assert_array_equal(layer.corner_pixels, initial_corners)
+
+    # This test never otherwise pumps the Qt event loop, so a short-lived
+    # QTimer armed as a side effect of on_draw() (e.g. the canvas's mouse
+    # move qthrottled callback) can still show as "active" at teardown -
+    # not because its delay hasn't elapsed, but because nothing gave the
+    # event loop a chance to actually fire it. Let it settle here.
+    qtbot.wait(10)
 
 
 def test_3D_multiscale_image(make_napari_viewer):
