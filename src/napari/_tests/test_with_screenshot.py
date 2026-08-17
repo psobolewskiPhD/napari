@@ -1,5 +1,8 @@
+from contextlib import suppress
+
 import numpy as np
 import pytest
+from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from napari._tests.utils import skip_local_popups, skip_on_win_ci
 from napari.layers import Shapes
@@ -218,7 +221,7 @@ def test_changing_image_gamma(make_napari_viewer):
 
 @skip_on_win_ci
 @skip_local_popups
-def test_grid_mode(make_napari_viewer):
+def test_grid_mode(make_napari_viewer, qtbot):
     # CMYBGR is the default color order when adding multichannel images.
     # See `napari.layers.utils.stack_utils.split_channels`.
     color = [
@@ -241,8 +244,19 @@ def test_grid_mode(make_napari_viewer):
     assert viewer.canvas.grid.stride == 1
 
     # check screenshot
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
-    center = tuple(np.round(np.divide(screenshot.shape[:2], 2)).astype(int))
+    screenshot = None
+    center = None
+
+    def _screenshot_matches_last_layer():
+        nonlocal screenshot, center
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        center = tuple(
+            np.round(np.divide(screenshot.shape[:2], 2)).astype(int)
+        )
+        return np.allclose(screenshot[center], color[-1], atol=1)
+
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_screenshot_matches_last_layer, timeout=4000)
     np.testing.assert_almost_equal(screenshot[center], color[-1])
 
     # enter grid view
@@ -251,8 +265,6 @@ def test_grid_mode(make_napari_viewer):
     assert viewer.canvas.grid.actual_shape(viewer.layers) == (2, 3)
     assert viewer.canvas.grid.stride == 1
 
-    # check screenshot
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
     # sample 6 squares of the grid and check they have right colors
     pos = [
         (1 / 4, 1 / 6),
@@ -262,6 +274,27 @@ def test_grid_mode(make_napari_viewer):
         (3 / 4, 3 / 6),
         (3 / 4, 5 / 6),
     ]
+
+    def _grid_screenshot_matches():
+        nonlocal screenshot
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        return all(
+            np.allclose(
+                screenshot[
+                    tuple(
+                        np.round(np.multiply(screenshot.shape[:2], p)).astype(
+                            int
+                        )
+                    )
+                ],
+                c,
+                atol=1,
+            )
+            for c, p in zip(color, pos, strict=False)
+        )
+
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_grid_screenshot_matches, timeout=4000)
     for c, p in zip(color, pos, strict=False):
         coord = tuple(
             np.round(np.multiply(screenshot.shape[:2], p)).astype(int)
