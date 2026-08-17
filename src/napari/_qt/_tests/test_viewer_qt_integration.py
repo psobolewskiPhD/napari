@@ -427,8 +427,18 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
 
     viewer.window._qt_viewer.clipboard(flash=True)
 
-    viewer.window.clipboard(flash=False, canvas_only=True)
+    def _copy_canvas_only():
+        # Setting the X11 clipboard selection owner is a shared,
+        # process-wide resource; under xdist's concurrent worker processes
+        # on one Xvfb display it can fail outright ("Cannot set X11
+        # selection owner") with no internal retry from Qt, so retry the
+        # copy itself instead of just waiting for an image that will
+        # never arrive on its own. flash=False here, so retrying doesn't
+        # risk leaking flash animations.
+        viewer.window.clipboard(flash=False, canvas_only=True)
+        return not QGuiApplication.clipboard().image().isNull()
 
+    qtbot.waitUntil(_copy_canvas_only, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
@@ -444,8 +454,17 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
     clipboard_image = QGuiApplication.clipboard().image()
     assert clipboard_image.isNull()
 
-    # capture screenshot of the entire window
-    viewer.window.clipboard(flash=True)
+    # Capture once - this also triggers the flash animation, exactly once.
+    # Retrying the clipboard *write* below must not re-trigger it, since
+    # add_flash_animation() doesn't stop a still-running previous one, so
+    # a second call here could leak a dangling QPropertyAnimation.
+    img = viewer.window._screenshot(flash=True)
+
+    def _set_clipboard():
+        QGuiApplication.clipboard().setImage(img)
+        return not QGuiApplication.clipboard().image().isNull()
+
+    qtbot.waitUntil(_set_clipboard, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
@@ -458,7 +477,7 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
 
 
 @skip_on_win_ci
-def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
+def test_qt_viewer_clipboard_without_flash(make_napari_viewer, qtbot):
     viewer = make_napari_viewer()
     # make sure clipboard is empty
     QGuiApplication.clipboard().clear()
@@ -468,8 +487,17 @@ def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
     # capture screenshot
     viewer.window._qt_viewer.clipboard(flash=False)
 
-    viewer.window.clipboard(flash=False, canvas_only=True)
+    def _copy_canvas_only():
+        # Setting the X11 clipboard selection owner is a shared,
+        # process-wide resource; under xdist's concurrent worker processes
+        # on one Xvfb display it can fail outright ("Cannot set X11
+        # selection owner") with no internal retry from Qt, so retry the
+        # copy itself instead of just waiting for an image that will
+        # never arrive on its own.
+        viewer.window.clipboard(flash=False, canvas_only=True)
+        return not QGuiApplication.clipboard().image().isNull()
 
+    qtbot.waitUntil(_copy_canvas_only, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
@@ -483,7 +511,11 @@ def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
     assert clipboard_image.isNull()
 
     # capture screenshot of the entire window
-    viewer.window.clipboard(flash=False)
+    def _copy_whole_window():
+        viewer.window.clipboard(flash=False)
+        return not QGuiApplication.clipboard().image().isNull()
+
+    qtbot.waitUntil(_copy_whole_window, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
