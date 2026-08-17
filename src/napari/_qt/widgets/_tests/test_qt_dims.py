@@ -379,6 +379,13 @@ def test_play_button(qtbot, mock_qt_method_ctx, qt_dims):
 
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: qt_dims.is_playing)
+    # qt_dims.is_playing flips as soon as the animation thread clears its
+    # internal Event, which can happen before the thread's queued
+    # `started` signal is processed and updates the button's own
+    # `playing` property. _on_click() below checks that property, not
+    # is_playing, to decide whether a click means start or stop - wait
+    # for it directly so the next click isn't misread as another start.
+    qtbot.waitUntil(lambda: button.property('playing') == 'True')
 
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: not qt_dims.is_playing)
