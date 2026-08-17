@@ -46,6 +46,14 @@ skip_local_focus = pytest.mark.skipif(
     ' Set NAPARI_FOCUS_TESTS=1 environment variable to enable.',
 )
 
+skip_on_mac_xdist = pytest.mark.skipif(
+    sys.platform.startswith('darwin')
+    and os.environ.get('PYTEST_XDIST_WORKER') is not None,
+    reason='Real OS keyboard focus is unreliable on macOS when many'
+    ' xdist worker processes are showing windows at once - only one'
+    ' process can be the frontmost/key window at a time.',
+)
+
 """
 The default timeout duration in seconds when waiting on tasks running in non-main threads.
 The value was chosen to be consistent with `QtBot.waitSignal` and `QtBot.waitUntil`.
