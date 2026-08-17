@@ -501,7 +501,7 @@ def test_scale_bar_visible(make_napari_viewer):
 
 @skip_on_win_ci
 @skip_local_popups
-def test_screenshot_has_no_border(make_napari_viewer):
+def test_screenshot_has_no_border(make_napari_viewer, qtbot):
     """See https://github.com/napari/napari/issues/3357"""
     viewer = make_napari_viewer(show=True)
     image_data = np.ones((60, 80), dtype=np.float32)
@@ -509,9 +509,21 @@ def test_screenshot_has_no_border(make_napari_viewer):
     # Zoom in dramatically to make the screenshot all red.
     viewer.scene.camera.zoom = 1000
 
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = None
+    expected = None
 
-    expected = np.broadcast_to([255, 0, 0, 255], screenshot.shape)
+    def _screenshot_is_all_red():
+        nonlocal screenshot, expected
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        expected = np.broadcast_to([255, 0, 0, 255], screenshot.shape)
+        return np.array_equal(screenshot, expected)
+
+    # Same class of race as the grid-mode/blending-mode screenshots in this
+    # file: the zoom change needs time to propagate into the rendered scene
+    # under CPU contention, so poll instead of grabbing a single frame.
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_screenshot_is_all_red, timeout=4000)
+
     np.testing.assert_array_equal(screenshot, expected)
 
 
