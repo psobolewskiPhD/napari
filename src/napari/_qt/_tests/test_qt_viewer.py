@@ -36,6 +36,7 @@ from napari.utils.colormaps import DirectLabelColormap, label_colormap
 from napari.utils.interactions import mouse_press_callbacks
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from numpy.typing import ArrayLike
@@ -754,15 +755,27 @@ def _update_data(
     qtbot: QtBot,
     qt_viewer: QtViewer,
     dtype: np.dtype = np.uint64,
+    expected_middle_pixel: Sequence[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Change layer data and return color of label and middle pixel of screenshot."""
+    """Change layer data and return color of label and middle pixel of screenshot.
+
+    Waits for the canvas to actually reflect the change before sampling it,
+    then returns the last observed pair for the caller to assert on.
+
+    By default the wait is for `QtColorBox.color` and the canvas' middle
+    pixel to agree, which is what most callers go on to assert. Pass
+    `expected_middle_pixel` for the cases where the two legitimately never
+    agree - a label whose colormap entry is transparent leaves the middle
+    pixel opaque black - so that the wait is for a condition that can
+    actually become true.
+    """
     layer.data = np.full((2, 2), label, dtype=dtype)
     layer.selected_label = label
 
     colorbox = qt_viewer.controls.widgets[layer]._label_control.colorbox
     captured = {}
 
-    def _colorbox_matches_screenshot() -> bool:
+    def _canvas_caught_up() -> bool:
         # colorbox.color is only ever set inside its paintEvent(); the
         # layer-change signal handlers just call self.update(), which
         # merely schedules a repaint on Qt's event queue rather than
@@ -773,20 +786,33 @@ def _update_data(
         shape = np.array(screenshot.shape[:2])
         captured['color_box_color'] = colorbox.color
         captured['middle_pixel'] = screenshot[tuple(shape // 2)]
-        if captured['color_box_color'] is None:
-            return False
-        return np.allclose(
-            captured['color_box_color'], captured['middle_pixel'], atol=1
+        target = (
+            captured['color_box_color']
+            if expected_middle_pixel is None
+            else expected_middle_pixel
         )
+        if target is None:
+            # `repaint()` above is synchronous, so `colorbox.color` being
+            # None here is a real state, not a not-yet-painted one:
+            # QtColorBox.paintEvent sets it to None (and draws a
+            # checkerboard) whenever the layer has no selected color, as
+            # for the background label. Nothing can agree with None, so
+            # waiting would burn the whole timeout - say so instead.
+            raise AssertionError(
+                f'QtColorBox has no color for label {label}, so there is '
+                'nothing for the canvas to agree with. Pass '
+                '`expected_middle_pixel` to say what to wait for.'
+            )
+        return np.allclose(target, captured['middle_pixel'], atol=1)
 
     # A fixed sleep here used to be enough for Qt to process the
     # QtColorBox update and the canvas repaint before the screenshot, but
     # under CPU contention (e.g. parallel xdist workers) that's no longer
-    # a safe assumption. Poll for the two to actually agree instead; on a
-    # genuine mismatch this still falls through to the assertions below
-    # for a clear diagnostic rather than raising a bare timeout.
+    # a safe assumption. Poll for the canvas to catch up instead; on a
+    # genuine mismatch this still falls through to the assertions in the
+    # caller for a clear diagnostic rather than raising a bare timeout.
     with suppress(QtBotTimeoutError):
-        qtbot.waitUntil(_colorbox_matches_screenshot, timeout=4000)
+        qtbot.waitUntil(_canvas_caught_up, timeout=4000)
 
     color_box_color = captured['color_box_color']
     middle_pixel = captured['middle_pixel']
@@ -881,8 +907,16 @@ def test_label_colors_matching_widget_direct(
     )
     layer.show_selected_label = use_selection
 
+    # label 0 is 'transparent' in `color`, so the colorbox reads (0, 0, 0, 0)
+    # while the canvas shows opaque black - tell _update_data what to wait
+    # for, since the usual colorbox/pixel agreement can never happen here.
     color_box_color, middle_pixel = _update_data(
-        layer, 0, qtbot, qt_viewer_with_controls, dtype
+        layer,
+        0,
+        qtbot,
+        qt_viewer_with_controls,
+        dtype,
+        expected_middle_pixel=[0, 0, 0, 255],
     )
     assert np.allclose([0, 0, 0, 255], middle_pixel)
 
