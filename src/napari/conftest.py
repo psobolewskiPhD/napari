@@ -852,6 +852,19 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
             thread.quit()
             qtbot.waitUntil(thread.isFinished, timeout=2000)
 
+    dangling_places = [calling for _, calling in dangling_threads_li]
+    # Threads the `pytest_runtest_teardown` hookimpl had to stop before
+    # pytest-qt's event pump could deliver a queued `deleteLater()` to their
+    # parent widget are no longer running, so the loop above cannot see them.
+    # They were still left running by this test, and destroying a running
+    # QThread is a fatal abort, so report them as leaks all the same.
+    dangling_places += [
+        f'{calling} (still running before pytest-qt pumped the event loop, so '
+        'it was force-stopped to keep a queued deleteLater() from destroying '
+        'it mid-run)'
+        for calling in request.node.stash.get(_FORCE_STOPPED_THREADS_KEY, [])
+    ]
+
     long_desc = (
         'If you see this error, it means that a QThread was started in a test '
         'but not terminated. This can cause segfaults in the test suite. '
@@ -862,14 +875,12 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
         'QThread class to do nothing.\n'
     )
 
-    if len(dangling_threads_li) > 1:
+    if len(dangling_places) > 1:
         long_desc += ' The QThreads were started in:\n'
     else:
         long_desc += ' The QThread was started in:\n'
 
-    assert not dangling_threads_li, long_desc + '\n'.join(
-        x[1] for x in dangling_threads_li
-    )
+    assert not dangling_places, long_desc + '\n'.join(dangling_places)
 
 
 @pytest.fixture
@@ -948,8 +959,20 @@ def _dangling_qthread_pool(monkeypatch, request):
 # Both are prevented by acting in a `tryfirst` hookimpl, which guarantees we
 # run before any non-tryfirst teardown hookimpl, regardless of fixture
 # teardown order.
+#
+# Acting that early has a catch: the fixtures decide what leaked by looking at
+# `isActive()`/`isRunning()`, and stopping something makes it look clean. Left
+# alone, this hookimpl would silently disable the very checks it exists to
+# protect. So it records what it had to force-stop, keyed per resource, and the
+# fixtures fold those records back into their own reports - see
+# `_FORCE_STOPPED_*_KEY` below.
 _PENDING_TIMERS_KEY: pytest.StashKey[list] = pytest.StashKey()
 _PENDING_THREADS_KEY: pytest.StashKey[WeakKeyDictionary] = pytest.StashKey()
+
+# Calling places of resources this hookimpl force-stopped, so that
+# `_dangling_qtimers`/`_dangling_qthreads` can still report them as leaks.
+_FORCE_STOPPED_TIMERS_KEY: pytest.StashKey[list] = pytest.StashKey()
+_FORCE_STOPPED_THREADS_KEY: pytest.StashKey[list] = pytest.StashKey()
 
 
 def _stop_thread_early(thread) -> None:
@@ -972,17 +995,32 @@ def _stop_thread_early(thread) -> None:
         thread.wait(2000)
 
 
+def _is_live(qt_object, predicate_name: str) -> bool:
+    """Call `isActive()`/`isRunning()`, treating a dead C++ object as not live."""
+    try:
+        return bool(getattr(qt_object, predicate_name)())
+    except RuntimeError:
+        return False
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_teardown(item, nextitem):
-    for timer, _ in item.stash.get(_PENDING_TIMERS_KEY, []):
-        with contextlib.suppress(RuntimeError):
-            if timer.isActive():
+    stopped_timers = item.stash.setdefault(_FORCE_STOPPED_TIMERS_KEY, [])
+    for timer, calling in item.stash.get(_PENDING_TIMERS_KEY, []):
+        if _is_live(timer, 'isActive'):
+            # record before stopping: a resource we then fail to stop matters
+            # more, not less.
+            stopped_timers.append(calling)
+            with contextlib.suppress(RuntimeError):
                 timer.stop()
 
-    for thread in list(item.stash.get(_PENDING_THREADS_KEY, {})):
-        with contextlib.suppress(RuntimeError):
-            if thread.isRunning():
-                _stop_thread_early(thread)
+    stopped_threads = item.stash.setdefault(_FORCE_STOPPED_THREADS_KEY, [])
+    for thread, calling in list(
+        item.stash.get(_PENDING_THREADS_KEY, {}).items()
+    ):
+        if _is_live(thread, 'isRunning'):
+            stopped_threads.append(calling)
+            _stop_thread_early(thread)
 
 
 @pytest.fixture
@@ -1058,13 +1096,25 @@ def _dangling_qtimers(monkeypatch, request):
         with suppress(RuntimeError):
             timer.stop()
 
+    dangling_places = [calling for _, calling in dangling_timers]
+    # Timers the `pytest_runtest_teardown` hookimpl above had to stop before
+    # pytest-qt's event pump could fire them are no longer active, so the loop
+    # above cannot see them - but they were still left running by this test,
+    # which is exactly the hazard. Report them too, tagged so they can be told
+    # apart from a timer that was still active at fixture-teardown time.
+    dangling_places += [
+        f'{calling} (still active before pytest-qt pumped the event loop, so '
+        'it was force-stopped to keep it from firing into a torn-down test)'
+        for calling in request.node.stash.get(_FORCE_STOPPED_TIMERS_KEY, [])
+    ]
+
     long_desc = (
         'If you see this error, it means that a QTimer was started but not stopped. '
         'This can cause tests to fail, and can also cause segfaults. '
         'If this test does not require a QTimer to pass you could monkeypatch it out. '
         'If it does require a QTimer, you should stop or wait for it to finish before test ends. '
     )
-    if len(dangling_timers) > 1:
+    if len(dangling_places) > 1:
         long_desc += 'The QTimers were started in:\n'
     else:
         long_desc += 'The QTimer was started in:\n'
@@ -1079,8 +1129,8 @@ def _dangling_qtimers(monkeypatch, request):
             )
         return path
 
-    assert not dangling_timers, long_desc + '\n'.join(
-        _check_throttle_info(x[1]) for x in dangling_timers
+    assert not dangling_places, long_desc + '\n'.join(
+        _check_throttle_info(path) for path in dangling_places
     )
 
 
