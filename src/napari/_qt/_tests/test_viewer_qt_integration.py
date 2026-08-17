@@ -28,7 +28,14 @@ from napari.utils.theme import available_themes
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
 @patch('qtpy.QtWidgets.QApplication.topLevelWidgets')
-def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file(
+    mock_keyboard_modifiers, qapp_mock, make_napari_viewer, tmp_path
+):
     """Test dropping a python file on to the viewer."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'image_to_drop.py'
@@ -50,6 +57,7 @@ def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
@@ -67,7 +75,14 @@ def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
 @pytest.mark.usefixtures('builtins')
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
-def test_drop_python_file_3d(make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file_3d(
+    mock_keyboard_modifiers, make_napari_viewer, tmp_path
+):
     """Test that dropping a python file using a 3D image on the viewer works."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'image_to_drop_3d.py'
@@ -87,6 +102,7 @@ def test_drop_python_file_3d(make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
@@ -101,7 +117,14 @@ def test_drop_python_file_3d(make_napari_viewer, tmp_path):
 @pytest.mark.usefixtures('builtins')
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
-def test_drop_python_file_double_viewer(make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file_double_viewer(
+    mock_keyboard_modifiers, make_napari_viewer, tmp_path
+):
     """Test that dropping a python file on the viewer works."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'test.py'
@@ -123,6 +146,7 @@ def test_drop_python_file_double_viewer(make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
