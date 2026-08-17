@@ -763,6 +763,12 @@ def _update_data(
     captured = {}
 
     def _colorbox_matches_screenshot() -> bool:
+        # colorbox.color is only ever set inside its paintEvent(); the
+        # layer-change signal handlers just call self.update(), which
+        # merely schedules a repaint on Qt's event queue rather than
+        # running paintEvent() synchronously. Force it directly instead
+        # of hoping the event queue delivers it.
+        colorbox.repaint()
         screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
         shape = np.array(screenshot.shape[:2])
         captured['color_box_color'] = colorbox.color
