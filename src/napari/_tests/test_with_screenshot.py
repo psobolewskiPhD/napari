@@ -530,20 +530,25 @@ def test_blending_modes_with_canvas(make_napari_viewer):
     viewer.window._qt_viewer.canvas.size = shape
     viewer.scene.camera.zoom = 1
 
+    # Pass size=shape so screenshot() resizes the canvas through
+    # QtViewer.resize_canvas, which divides by devicePixelRatio - without
+    # it, the returned array is in physical pixels and only matches shape
+    # on standard-DPI displays.
+
     # check that additive behaves correctly with black canvas
     img1_layer.blending = 'additive'
     img2_layer.blending = 'additive'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img1 + img2)
 
     # minimum should not result in black background if canvas is black
     img1_layer.blending = 'minimum'
     img2_layer.blending = 'minimum'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], np.minimum(img1, img2))
     # toggle visibility of bottom layer
     img1_layer.visible = False
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img2)
     # and canvas should not affect the above results
     viewer.window._qt_viewer.canvas.bgcolor = 'white'
@@ -552,17 +557,17 @@ def test_blending_modes_with_canvas(make_napari_viewer):
     img1_layer.visible = True
     img1_layer.blending = 'additive'
     img2_layer.blending = 'additive'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img1 + img2)
     # toggle visibility of bottom layer
     img1_layer.visible = False
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img2)
     # minimum should always work with white canvas bgcolor
     img1_layer.visible = True
     img1_layer.blending = 'minimum'
     img2_layer.blending = 'minimum'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], np.minimum(img1, img2))
 
 
