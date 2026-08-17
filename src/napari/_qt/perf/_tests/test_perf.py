@@ -12,7 +12,11 @@ import pytest
 from pretend import stub
 
 from napari._qt.perf import qt_performance
-from napari._tests.utils import skip_local_popups, skip_on_win_ci
+from napari._tests.utils import (
+    skip_local_popups,
+    skip_on_mac_ci,
+    skip_on_win_ci,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,6 +69,7 @@ def perfmon_script(tmp_path):
 
 
 @skip_on_win_ci
+@skip_on_mac_ci
 @skip_local_popups
 @pytest.mark.usefixtures('qapp')
 def test_trace_on_start(tmp_path: Path, perf_config, perfmon_script):
