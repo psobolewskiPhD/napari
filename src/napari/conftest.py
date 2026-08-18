@@ -45,7 +45,7 @@ from itertools import chain
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from unittest.mock import MagicMock
 from weakref import WeakKeyDictionary
 
@@ -63,6 +63,8 @@ from napari.layers import Image, Labels, Points, Shapes, Vectors
 from napari.utils.misc import ROOT_DIR
 
 if TYPE_CHECKING:
+    from collections.abc import Container
+
     from npe2._pytest_plugin import TestPluginManager
     from pytestqt.qtbot import QtBot
 
@@ -1296,7 +1298,7 @@ with contextlib.suppress(ImportError):
         )
 
 
-def _short_repr(obj, limit=200):
+def _short_repr(obj: object, limit: int = 200) -> str:
     """repr() an arbitrary gc referrer without risking a crash/huge dump."""
     try:
         text = repr(obj)
@@ -1330,7 +1332,12 @@ def _describe_dangling_widgets(request, creation_places) -> str:
     from napari._qt.qt_main_window import _QtMainWindow
 
     top_level_widgets = QApplication.topLevelWidgets()
-    viewer_weak_set = getattr(request.node, '_viewer_weak_set', set())
+    # `make_napari_viewer` stashes a `WeakSet[Viewer]` here; the default covers
+    # tests that never asked for a viewer. Only ever tested for membership, so
+    # `Container` is all this needs to promise.
+    viewer_weak_set: Container[Any] = getattr(
+        request.node, '_viewer_weak_set', set()
+    )
 
     problematic_widgets = []
 
