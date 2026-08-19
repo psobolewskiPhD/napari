@@ -797,22 +797,40 @@ def _update_data(
             # QtColorBox.paintEvent sets it to None (and draws a
             # checkerboard) whenever the layer has no selected color, as
             # for the background label. Nothing can agree with None, so
-            # waiting would burn the whole timeout - say so instead.
-            raise AssertionError(
+            # waiting cannot help - fail immediately.
+            #
+            # Deliberately not an AssertionError: `qtbot.waitUntil` treats
+            # that as "condition not met yet" and retries, so it would poll
+            # to timeout and then be swallowed by the `suppress` below,
+            # leaving the caller comparing None. Any other exception
+            # propagates straight out.
+            raise RuntimeError(
                 f'QtColorBox has no color for label {label}, so there is '
                 'nothing for the canvas to agree with. Pass '
                 '`expected_middle_pixel` to say what to wait for.'
             )
         return np.allclose(target, captured['middle_pixel'], atol=1)
 
-    # A fixed sleep here used to be enough for Qt to process the
-    # QtColorBox update and the canvas repaint before the screenshot, but
-    # under CPU contention (e.g. parallel xdist workers) that's no longer
-    # a safe assumption. Poll for the canvas to catch up instead; on a
-    # genuine mismatch this still falls through to the assertions in the
-    # caller for a clear diagnostic rather than raising a bare timeout.
+    # A fixed sleep here used to be enough for Qt to process the QtColorBox
+    # update and the canvas repaint before the screenshot, but under CPU
+    # contention (e.g. parallel xdist workers) that's no longer a safe
+    # assumption. Poll for the canvas to catch up instead.
+    #
+    # On a genuine mismatch this deliberately falls through to the caller's
+    # assertions rather than raising a bare timeout: the poll's success
+    # condition and those assertions are the same comparison on the same
+    # captured values, so a timeout always produces a real assertion failure
+    # naming both colours - never a silent pass.
+    #
+    # The timeout is generous because one iteration is expensive where it
+    # matters: on the macOS CI runner (software GL, four xdist workers) a
+    # single screenshot of this canvas costs seconds, so 4000ms allowed only
+    # about one attempt and a canvas needing a second turn would have failed
+    # falsely. Raising it costs nothing when the test passes, since the poll
+    # returns as soon as the condition holds; it only lengthens the failing
+    # path.
     with suppress(QtBotTimeoutError):
-        qtbot.waitUntil(_canvas_caught_up, timeout=4000)
+        qtbot.waitUntil(_canvas_caught_up, timeout=10000)
 
     color_box_color = captured['color_box_color']
     middle_pixel = captured['middle_pixel']
