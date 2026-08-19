@@ -572,16 +572,25 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
         lambda: not hist._compute_scheduled and not hist._dirty,
         timeout=15000,
     )
-    # _compute_scheduled/_dirty are set directly by the worker thread as
-    # soon as the generator exhausts, which can race ahead of the main
-    # thread actually dispatching the queued per-chunk `yielded` signals
-    # that drive set_data. Give the event loop a moment to catch up on
-    # any still-queued deliveries before counting draws.
-    qtbot.wait(50)
 
     # Both views animated progressively from the single worker's chunks.
-    assert draws['a'] > 1
-    assert draws['b'] > 1
+    #
+    # `_compute_scheduled`/`_dirty` are cleared directly by the worker thread
+    # as soon as the generator exhausts, which can race ahead of the main
+    # thread dispatching the queued per-chunk `yielded` signals that drive
+    # set_data - so the counts can still be catching up here. A fixed
+    # `qtbot.wait(50)` used to cover that gap and was not enough: on macOS CI
+    # this failed with `assert 1 > 1`. Wait for the counts themselves.
+    #
+    # The assertions live inside the callback deliberately: pytest-qt chains an
+    # AssertionError raised there as the cause of its own TimeoutError, so a
+    # real regression still reports `assert 1 > 1` rather than a bare
+    # "waitUntil timed out".
+    def both_views_animated():
+        assert draws['a'] > 1
+        assert draws['b'] > 1
+
+    qtbot.waitUntil(both_views_animated)
     # Single-worker invariant held to completion — nothing left dangling.
     assert not hist._compute_scheduled
     assert view_a._compute_worker is None
