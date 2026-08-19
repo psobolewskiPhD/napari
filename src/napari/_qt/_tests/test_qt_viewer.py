@@ -792,23 +792,14 @@ def _update_data(
             else expected_middle_pixel
         )
         if target is None:
-            # `repaint()` above is synchronous, so `colorbox.color` being
-            # None here is a real state, not a not-yet-painted one:
-            # QtColorBox.paintEvent sets it to None (and draws a
-            # checkerboard) whenever the layer has no selected color, as
-            # for the background label. Nothing can agree with None, so
-            # waiting cannot help - fail immediately.
-            #
-            # Deliberately not an AssertionError: `qtbot.waitUntil` treats
-            # that as "condition not met yet" and retries, so it would poll
-            # to timeout and then be swallowed by the `suppress` below,
-            # leaving the caller comparing None. Any other exception
-            # propagates straight out.
-            raise RuntimeError(
-                f'QtColorBox has no color for label {label}, so there is '
-                'nothing for the canvas to agree with. Pass '
-                '`expected_middle_pixel` to say what to wait for.'
-            )
+            # `colorbox.color` is None until QtColorBox has painted a colour
+            # for the selected label, and `repaint()` above only guarantees
+            # that paintEvent *ran* - not that the layer had computed
+            # `_selected_color` by then. So None here is usually "not ready
+            # yet" and has to be retried; it is only permanent for a label
+            # that renders transparent, and those callers say what they
+            # expect via `expected_middle_pixel` instead.
+            return False
         return np.allclose(target, captured['middle_pixel'], atol=1)
 
     # A fixed sleep here used to be enough for Qt to process the QtColorBox
@@ -831,6 +822,17 @@ def _update_data(
     # path.
     with suppress(QtBotTimeoutError):
         qtbot.waitUntil(_canvas_caught_up, timeout=10000)
+
+    if captured['color_box_color'] is None and expected_middle_pixel is None:
+        # Diagnosed here rather than inside the poll: a None colour has to be
+        # retried while the poll is running, and is only worth reporting if it
+        # is still None once the poll has given up. Otherwise the caller would
+        # compare None against a pixel array and fail obscurely.
+        raise AssertionError(
+            f'QtColorBox never got a color for label {label}. If this label '
+            'renders transparent, pass `expected_middle_pixel` to say what '
+            'the canvas should show instead.'
+        )
 
     color_box_color = captured['color_box_color']
     middle_pixel = captured['middle_pixel']
