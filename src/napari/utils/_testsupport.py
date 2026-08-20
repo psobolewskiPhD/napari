@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 import sys
+import traceback
 import warnings
 from contextlib import suppress
 from dataclasses import dataclass
@@ -580,6 +581,22 @@ class LeakSafeLogRecord(logging.LogRecord):
                 str(arg) if not isinstance(arg, int | float) else arg
                 for arg in self.args
             )
+        if self.exc_info is not None:
+            # `logger.exception(...)` stores the live exception here, and its
+            # traceback keeps every frame alive - including the `self` of
+            # whichever method logged. pytest's logging plugin holds records
+            # for the duration of a test, so a Qt object that logs an
+            # exception looks leaked to the `QtViewer._instances` and
+            # dangling-widget checks. Same retention mechanism as the one
+            # `_find_dangling_widgets` had to be restructured for.
+            #
+            # Render it now and drop the frames: handlers prefer `exc_text`
+            # when it is set, so the traceback still reaches the output.
+            if self.exc_text is None:
+                self.exc_text = ''.join(
+                    traceback.format_exception(*self.exc_info)
+                ).rstrip('\n')
+            self.exc_info = None
 
 
 @pytest.fixture(autouse=True, scope='session')
