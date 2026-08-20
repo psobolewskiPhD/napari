@@ -573,24 +573,28 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
         timeout=15000,
     )
 
-    # Both views animated progressively from the single worker's chunks.
+    # Neither view was left blank. That is the deterministic core of the
+    # regression this guards - the popup showed nothing at all while the
+    # inline view rendered.
     #
-    # `_compute_scheduled`/`_dirty` are cleared directly by the worker thread
-    # as soon as the generator exhausts, which can race ahead of the main
-    # thread dispatching the queued per-chunk `yielded` signals that drive
-    # set_data - so the counts can still be catching up here. A fixed
-    # `qtbot.wait(50)` used to cover that gap and was not enough: on macOS CI
-    # this failed with `assert 1 > 1`. Wait for the counts themselves.
+    # Deliberately not `draws[...] > 1`, nor `draws['a'] == draws['b']`.
+    # Both are races between the worker producing chunks and the main thread
+    # dispatching the queued `yielded` signals, and the draw count is not
+    # merely late but *lossy*: `_on_partial_histogram` returns early when
+    # `_histogram._dirty` is False, and finishing the compute clears
+    # `_dirty`, so a backlog of partials is discarded rather than delayed.
+    # Measured by blocking the main thread for 1.5s while the worker runs,
+    # draws goes from {'a': 64, 'b': 64} to {'a': 1, 'b': 1} - and with the
+    # two views starting at different times, to {'a': 1, 'b': 2}. That is
+    # what failed on macOS CI, and no timeout recovers a dropped signal; a
+    # `qtbot.wait(50)` and then a `waitUntil` both tried and both failed.
     #
-    # The assertions live inside the callback deliberately: pytest-qt chains an
-    # AssertionError raised there as the cause of its own TimeoutError, so a
-    # real regression still reports `assert 1 > 1` rather than a bare
-    # "waitUntil timed out".
-    def both_views_animated():
-        assert draws['a'] > 1
-        assert draws['b'] > 1
-
-    qtbot.waitUntil(both_views_animated)
+    # The progressive animation and the broadcast-to-every-view behaviour are
+    # covered deterministically by
+    # `test_partial_histogram_broadcasts_to_all_views` below, which drives the
+    # partial path instead of racing it.
+    assert draws['a'] >= 1, f'view_a never rendered: {draws}'
+    assert draws['b'] >= 1, f'view_b never rendered: {draws}'
     # Single-worker invariant held to completion — nothing left dangling.
     assert not hist._compute_scheduled
     assert view_a._compute_worker is None
@@ -609,6 +613,55 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
         lambda: QThreadPool.globalInstance().activeThreadCount() == 0,
         timeout=10000,
     )
+
+
+def test_partial_histogram_broadcasts_to_all_views(qtbot):
+    """A partial result from one view's worker redraws *every* view.
+
+    This is the progressive-animation half of
+    `test_two_views_share_single_worker_and_both_animate`, driven directly
+    rather than raced. Going through the real worker makes the draw count a
+    function of how promptly the main thread services the queued `yielded`
+    signals - and `_on_partial_histogram` drops partials once
+    `_histogram._dirty` is cleared by the compute finishing, so a starved
+    main thread loses them outright instead of merely arriving late.
+    """
+    dask = pytest.importorskip('dask.array')
+    base = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
+    layer = Image(dask.from_array(base, chunks=(32, 32)))
+    layer.histogram.mode = 'full'
+
+    view_a = QtHistogramWidget(layer)
+    view_b = QtHistogramWidget(layer)
+    qtbot.addWidget(view_a)
+    qtbot.addWidget(view_b)
+
+    draws = {'a': 0, 'b': 0}
+    for key, view in (('a', view_a), ('b', view_b)):
+        orig = view.histogram_visual.set_data
+
+        def count(*args, _key=key, _orig=orig, **kwargs):
+            draws[_key] += 1
+            return _orig(*args, **kwargs)
+
+        view.histogram_visual.set_data = count
+
+    hist = layer.histogram
+    # `_on_partial_histogram` is a no-op unless a compute is outstanding
+    hist._dirty = True
+
+    n_partials = 3
+    for i in range(1, n_partials + 1):
+        counts = np.full(hist.bins, i, dtype=np.int64)
+        bin_edges = np.linspace(0, 1, hist.bins + 1)
+        view_a._on_partial_histogram((bin_edges, counts))
+
+    assert draws == {'a': n_partials, 'b': n_partials}, (
+        'each partial from one view must redraw both views once'
+    )
+
+    view_a.cleanup()
+    view_b.cleanup()
 
 
 def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
