@@ -274,10 +274,14 @@ class Viewer(ViewerModel):
         # can still be pending here. Flush it now, while layers are still
         # valid, rather than let it fire later against layers this method
         # is about to clear.
-        qt_window = getattr(self.window, '_qt_window', None)
-        qt_viewer = getattr(qt_window, '_qt_viewer', None)
-        if qt_viewer is not None:
-            qt_viewer._process_slice_ready_events()
+        #
+        # Guarded the way `Window.close()` guards itself, and for the same
+        # reason: closing twice is expected (`close_all()` alongside an
+        # explicit close, say), and the first close does `del self._qt_window`
+        # - which is exactly what the `Window._qt_viewer` property reads
+        # through, so reaching for it unguarded would raise on the second.
+        if hasattr(self.window, '_qt_window'):
+            self.window._qt_viewer._process_slice_ready_events()
         # Disconnect changes to dims before removing layers one-by-one
         # to avoid any unnecessary slicing.
         disconnect_events(self.dims.events, self)
