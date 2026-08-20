@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -664,7 +666,9 @@ def test_partial_histogram_broadcasts_to_all_views(qtbot):
     view_b.cleanup()
 
 
-def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
+def test_closing_owning_view_mid_compute_hands_off_to_survivor(
+    qtbot, monkeypatch
+):
     """Closing the view that owns the in-flight worker nudges a surviving
     view to finish the compute, instead of stranding it with partial data.
 
@@ -676,6 +680,35 @@ def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
     layer = Image(dask.from_array(base, chunks=(32, 32)))
     layer.histogram.mode = 'full'
 
+    # Park the worker inside its first chunk load so the compute is
+    # *guaranteed* unfinished when the owning view closes.
+    #
+    # "Still computing" is not a state the main thread can assert, only one it
+    # can enforce: `_compute_chunked_progressive` clears `_dirty` from the
+    # worker thread, and these 64 chunks of 1024 elements are ~1ms of numpy
+    # (which drops the GIL), so losing the GIL for a single switch interval
+    # after `worker.start()` is enough for the whole compute to land first.
+    # Asserting `_dirty` unguarded raced against that and failed on CI.
+    #
+    # Blocking in `_load_chunk` also exercises the mid-chunk branch that
+    # `QtHistogramWidget.cleanup` documents but nothing else reaches: the
+    # generator is stopped while stuck on a chunk read rather than between
+    # iterations.
+    entered_chunk_load = threading.Event()
+    release_chunk_load = threading.Event()
+    real_load_chunk = HistogramModel._load_chunk
+
+    def gated_load_chunk(data, flat_idx):
+        entered_chunk_load.set()
+        # A timeout rather than a bare wait, so a regression that never
+        # releases the worker fails the test instead of hanging the suite.
+        release_chunk_load.wait(timeout=30)
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(gated_load_chunk)
+    )
+
     view_a = QtHistogramWidget(layer)
     view_b = QtHistogramWidget(layer)
     qtbot.addWidget(view_a)
@@ -685,13 +718,17 @@ def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
     layer.histogram.enabled = True  # starts the shared worker synchronously
 
     # Identify the owning view and close it before the compute finishes.
+    assert entered_chunk_load.wait(timeout=10), (
+        'worker never reached _load_chunk'
+    )
     assert hist._compute_scheduled
     if view_a._compute_worker is not None:
         owner, survivor = view_a, view_b
     else:
         owner, survivor = view_b, view_a
-    assert hist._dirty  # compute has not completed yet
+    assert hist._dirty  # compute is parked in _load_chunk, so cannot be done
     owner.cleanup()
+    release_chunk_load.set()
 
     # The survivor must take over and finish the compute correctly.
     qtbot.waitUntil(
