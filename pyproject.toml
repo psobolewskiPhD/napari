@@ -159,7 +159,9 @@ testing = [
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
-    "pytest>=8.3.5",
+    # >=9.0.0 for the `faulthandler_exit_on_timeout` ini option, which turns a
+    # hung test into a bounded, self-describing failure. See [tool.pytest.ini_options].
+    "pytest>=9.0.0",
     "pytest-rerunfailures>=15.1",
     "pytest-xdist>=3.6.1",
     "tensorstore>=0.1.43",
@@ -221,7 +223,7 @@ docs = [
     # triangle and bermuda needed for docs/guides/triangulation.md
     "triangle; python_version <= '3.13'",  # there is no wheel for triangle on python 3.14 at the time and build from source causes problems.
     "bermuda>=0.1.4",
-    "pytest",
+    "pytest>=9.0.0",  # see the note in the `testing` extra
     "linkify-it-py",
     "numba!=0.62.1,!=0.62.0",
 ]
@@ -250,7 +252,9 @@ testing = [
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
-    "pytest>=8.3.5",
+    # >=9.0.0 for the `faulthandler_exit_on_timeout` ini option, which turns a
+    # hung test into a bounded, self-describing failure. See [tool.pytest.ini_options].
+    "pytest>=9.0.0",
     "pytest-rerunfailures>=15.1",
     "pytest-xdist>=3.6.1",
     "tensorstore>=0.1.43",
@@ -312,7 +316,7 @@ docs = [
     # triangle and bermuda needed for docs/guides/triangulation.md
     "triangle; python_version <= '3.13'",  # there is no wheel for triangle on python 3.14 at the time and build from source causes problems.
     "bermuda>=0.1.4",
-    "pytest",
+    "pytest>=9.0.0",  # see the note in the `testing` extra
     "linkify-it-py",
     "numba!=0.62.1,!=0.62.0",
 ]
@@ -490,7 +494,37 @@ xarray = "xr"
 # https://docs.python.org/3/library/warnings.html#describing-warning-filters
 addopts = ["--maxfail=5",  "--durations=10",  "-ra", "--strict-markers", "--strict-config"]
 console_output_style = "count"
-minversion = "8"
+minversion = "9"
+
+# A hang is the one failure mode that reports nothing: no traceback, no diff,
+# just a progress line that stops moving.  Under xdist even the progress count
+# is aggregated across workers, so it cannot name the test that stopped.
+#
+# faulthandler_timeout dumps the stack of *every* thread - which is what you
+# need, since these hangs are threading bugs - and exit_on_timeout then kills
+# the worker, so xdist reports "worker gwN crashed while running <test>" and
+# reschedules the rest of the file instead of the job stalling to its
+# wall-clock limit.  A hang that happens only once is still reported as a
+# failure; the respawn does not paper over it.
+#
+# On the value: this has to clear the slowest *legitimate* test by a wide
+# margin, because a false positive here manufactures a new flake.  The slowest
+# tests are far slower than local runs suggest - on macos-15-intel py3.14
+# pyqt5, from the CI timing report:
+#
+#   121.7s  test_qt_viewer.py::test_label_colors_matching_widget_auto[int16-all]
+#   101.1s  test_vispy_labels_layer.py::test_labels_iso_gradient_modes
+#    99.4s  test_viewer_qt_integration.py::test_screenshot
+#
+# with a dozen tests over 50s.  600s leaves ~5x headroom over the observed
+# worst case while still catching a deadlock in a fraction of the job's
+# ~20 minute runtime.  Revisit if a legitimate test ever approaches it.
+#
+# NOTE: faulthandler_exit_on_timeout requires pytest >= 9.0.0, which is why the
+# `testing` extra pins that floor.  With --strict-config an older pytest fails
+# loudly on this key rather than silently ignoring it.
+faulthandler_timeout = 600
+faulthandler_exit_on_timeout = true
 # log_cli_level = "INFO"
 xfail_strict = true
 testpaths = ["napari", "napari_builtins"]
