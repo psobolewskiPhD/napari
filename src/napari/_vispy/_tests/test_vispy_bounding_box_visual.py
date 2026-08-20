@@ -120,3 +120,52 @@ def test_bounding_box_multiscale_2D_zoom_stable(make_napari_viewer, qtbot):
 
     # make sure zooming actually changed the level/corners under test
     assert len(seen_states) > 1
+
+
+@pytest.mark.skipif(
+    sys.platform == 'win32', reason='This new test is flaky on windows'
+)
+@pytest.mark.parametrize(
+    'zooms',
+    [(0.2, 1.0, 4.0), (4.0, 1.0, 0.2), (1.0, 0.2, 1.0), (4.0,)],
+    ids=('out-to-in', 'in-to-out', 'there-and-back', 'in-only'),
+)
+def test_bounding_box_multiscale_2D_zoom_order_independent(
+    make_napari_viewer, qtbot, zooms
+):
+    """The box must sit at the full extent whatever order levels are visited.
+
+    `test_..._zoom_stable` only ever zooms out-to-in, which meant it never
+    sampled a level-0 view whose `corner_pixels[0]` is still at the origin -
+    the state where the overlay used to keep an identity transform because
+    nothing had pushed the layer node's compensating child offset onto it
+    since it was parented. The box then sat half a pixel of the displayed
+    level off: -0.5 at level 0, and proportionally more at coarser levels.
+    """
+    viewer = make_napari_viewer(show=True)
+
+    data = np.ones((800, 800))
+    layer = viewer.add_image(
+        [data, data[::2, ::2], data[::4, ::4]], multiscale=True
+    )
+    layer.bounding_box.visible = True
+
+    viewer.window._qt_viewer.canvas.size = (200, 200)
+
+    for zoom in zooms:
+        viewer.scene.camera.zoom = zoom
+        viewer.scene.camera.center = (0.0, 300.0, 300.0)
+        viewer.window._qt_viewer.canvas.on_draw(None)
+        qtbot.waitUntil(lambda: layer.loaded)
+        viewer.window._qt_viewer.canvas.on_draw(None)
+
+        world = _bounding_box_world_vertices(viewer, layer)
+        for axis in range(2):
+            np.testing.assert_allclose(
+                (world[:, axis].min(), world[:, axis].max()),
+                (-0.5, 799.5),
+                err_msg=(
+                    f'zoom={zoom}, axis={axis}, level={layer.data_level}, '
+                    f'corner_pixels[0]={layer.corner_pixels[0]}'
+                ),
+            )
