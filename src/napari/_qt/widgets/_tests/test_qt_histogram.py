@@ -461,7 +461,9 @@ def test_qt_histogram_layer_bar_color(qtbot):
     widget.cleanup()
 
 
-def test_qt_histogram_mode_switch_uses_async_for_chunked_data(qtbot):
+def test_qt_histogram_mode_switch_uses_async_for_chunked_data(
+    qtbot, monkeypatch
+):
     """Switching to full mode on chunked data should use async compute,
     not block the main thread on synchronous chunk I/O.
 
@@ -479,35 +481,58 @@ def test_qt_histogram_mode_switch_uses_async_for_chunked_data(qtbot):
     layer = Image(data)
     layer.histogram.enabled = True
 
+    # Record which thread each chunk read happens on. The regression this
+    # test guards is *chunk I/O blocking the main thread*, so record that
+    # directly rather than inferring it from `_dirty`: the async worker
+    # clears `_dirty` from its own thread, so a fast worker can clear it
+    # before the main thread looks, and the old assertion then reported a
+    # synchronous compute when the compute had in fact correctly gone async.
+    main_thread = threading.get_ident()
+    chunk_load_threads: list[int] = []
+    real_load_chunk = HistogramModel._load_chunk
+
+    def recording_load_chunk(data, flat_idx):
+        chunk_load_threads.append(threading.get_ident())
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(recording_load_chunk)
+    )
+
     widget = QtHistogramWidget(layer)
     qtbot.addWidget(widget)
 
     # Initial state: model is clean from the canvas-mode compute that
-    # ran during __init__.
+    # ran during __init__, which does not touch chunks.
     assert not layer.histogram._dirty
+    assert chunk_load_threads == []
 
     # Switch to full mode.  In the buggy code this would trigger
     # _mark_dirty() → compute() → synchronous chunk iteration.
     layer.histogram.mode = 'full'
 
-    # After _mark_dirty() with the fix: _dirty should be True but
-    # compute() should NOT have been called (it was deferred for
-    # chunked data).  If _dirty is False here, compute() ran
-    # synchronously — the regression.
-    assert layer.histogram._dirty, (
-        '_mark_dirty() called compute() synchronously on mode switch '
-        'with chunked data — this would block the main thread'
+    # The regression: _mark_dirty() iterating compute() inline would have
+    # loaded chunks on this thread before the assignment returned.
+    assert main_thread not in chunk_load_threads, (
+        '_mark_dirty() called compute() synchronously on mode switch with '
+        'chunked data — this would block the main thread on chunk I/O'
     )
 
     # The widget should have started an async worker via
-    # _on_model_mode_change() → _ensure_histogram_computed().
-    # For small in-memory dask arrays the worker may already have
-    # finished, but if it's still running or just-completed we
-    # verify that the async path was taken by waiting for results.
+    # _on_model_mode_change() → _ensure_histogram_computed(). `_compute_worker`
+    # is only ever written on the main thread (set here, cleared from the
+    # queued `finished` handler), and we have not re-entered the event loop,
+    # so this cannot race with the worker.
+    assert widget._compute_worker is not None
+
     qtbot.waitUntil(
         lambda: not layer.histogram._dirty,
         timeout=30000,
     )
+
+    # Non-vacuous: chunks really were read, and never on the main thread.
+    assert chunk_load_threads
+    assert main_thread not in chunk_load_threads
 
     # Verify valid histogram results from the async path
     assert len(layer.histogram._bin_edges) == 257
