@@ -644,20 +644,41 @@ class QtViewer(QSplitter):
 
     @Slot()
     def _process_slice_ready_events(self) -> None:
-        """Handle any `_layer_slicer.events.ready` events queued by
-        `_queue_slice_ready`. Always runs on the main thread: either invoked
-        there via a queued connection, or called directly from other
-        main-thread-only code (e.g. `Viewer.close()`) to flush the queue
-        immediately.
+        """Handle `_layer_slicer.events.ready` events queued by
+        `_queue_slice_ready`.
 
-        `_on_slice_ready` is called directly here rather than through
-        `EventEmitter._invoke_callback`, which is what normally isolates a
-        callback's exceptions so one bad event can't take down the emitter.
-        `Viewer.close()`/`closeEvent` call this method directly to flush the
-        queue before tearing down, so an uncaught exception here would abort
-        the rest of their cleanup - exactly the kind of skipped teardown
-        that can itself cause a segfault. Mirror `_invoke_callback`'s
-        handling instead of letting it propagate.
+        This is the normal path, reached on the main thread via the queued
+        connection `_queue_slice_ready` sets up. Errors propagate, because
+        that is what connecting to the emitter directly would have done:
+        `EventEmitter._invoke_callback` defers to `_handle_exception`, which
+        re-raises unless `ignore_callback_errors` is set, and it defaults to
+        False. Swallowing here instead would turn a real slicing bug into a
+        log line that no test fails on.
+
+        Teardown wants the opposite, and calls
+        `_drain_slice_ready_events(suppress_errors=True)` directly.
+        """
+        self._drain_slice_ready_events(suppress_errors=False)
+
+    def _drain_slice_ready_events(self, *, suppress_errors: bool) -> None:
+        """Apply every queued slice-ready event, oldest first.
+
+        Draining the whole queue in one go is deliberate and safe: the
+        slicer's executor has a single worker, so completion order matches
+        submission order and the newest response is applied last. Superseded
+        slices are usually cancelled in `_LayerSlicer.submit` before they ever
+        complete, and one that slips through is inert -
+        `Layer._update_loaded_slice_id` only acts when the response's id is
+        still the layer's most recent.
+
+        Parameters
+        ----------
+        suppress_errors : bool
+            Log and continue instead of raising. Set only by teardown
+            (`Viewer.close`, `closeEvent`), which flushes this queue before
+            tearing layers down: an exception escaping there would skip the
+            rest of the cleanup, and skipped Qt teardown is itself a source
+            of segfaults. Every other caller wants the error.
         """
         while True:
             try:
@@ -667,8 +688,11 @@ class QtViewer(QSplitter):
             try:
                 self._on_slice_ready(event)
             except Exception:
+                if not suppress_errors:
+                    raise
                 logging.getLogger('napari').exception(
-                    'Error handling slice-ready event: %s', event
+                    'Error handling slice-ready event during teardown: %s',
+                    event,
                 )
 
     def _on_slice_ready(self, event: Event) -> None:
@@ -1419,9 +1443,10 @@ class QtViewer(QSplitter):
             Event from the Qt context.
         """
         # Flush any already-queued slice-ready events (see
-        # `_queue_slice_ready`/`_process_slice_ready_events`) while layers
-        # are still valid.
-        self._process_slice_ready_events()
+        # `_queue_slice_ready`/`_drain_slice_ready_events`) while layers are
+        # still valid. Errors are suppressed here so a bad event cannot skip
+        # the teardown below.
+        self._drain_slice_ready_events(suppress_errors=True)
 
         if self._layers is not None:
             # do not create layerlist if it does not exist yet.
