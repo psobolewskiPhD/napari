@@ -1,5 +1,7 @@
 # The tests in this module for the new style of async slicing in napari:
 # https://napari.org/dev/naps/4-async-slicing.html
+import logging
+import threading
 from functools import partial
 
 import numpy as np
@@ -249,6 +251,138 @@ def test_async_slice_two_layers_shutdown(make_napari_viewer):
     points.add([[1, 2]])
 
     viewer.close()
+
+
+# The tests below cover `QtViewer`'s slice-ready queue directly, rather than
+# through a real slicing round-trip. The queue exists because
+# `_layer_slicer.events.ready` is emitted from the slicing thread and the
+# handler must run on the main thread; the tests above prove the happy path
+# end-to-end, while these pin the three behaviours that only show up when
+# something goes wrong or when the viewer is being torn down.
+
+
+def _pending_ready_event() -> Event:
+    """A slice-ready event with no responses, as a stand-in for a real one."""
+    return Event('ready', value={})
+
+
+def test_slice_ready_hops_to_the_main_thread(make_napari_viewer, qtbot):
+    """`_queue_slice_ready` may run on the slicing thread; the handler may not.
+
+    This is the whole point of the queue-and-signal pair, and it is the one
+    part that cannot fail loudly on its own: if the hop silently did nothing,
+    slices would simply never be applied.
+    """
+    viewer = make_napari_viewer()
+    qt_viewer = viewer.window._qt_viewer
+
+    handled_on: list[int] = []
+    qt_viewer._on_slice_ready = lambda event: handled_on.append(
+        threading.get_ident()
+    )
+
+    main_thread = threading.get_ident()
+    emitted_on: list[int] = []
+
+    def emit_from_worker() -> None:
+        emitted_on.append(threading.get_ident())
+        qt_viewer._queue_slice_ready(_pending_ready_event())
+
+    worker = threading.Thread(target=emit_from_worker)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), 'emitting from a worker thread blocked'
+
+    # Nothing may have run yet: the connection is queued, so the handler waits
+    # for the main thread to return to its event loop.
+    assert handled_on == []
+
+    qtbot.waitUntil(lambda: len(handled_on) == 1)
+    assert worker.ident != main_thread
+    assert emitted_on == [worker.ident]
+    assert handled_on == [main_thread]
+
+
+def test_slice_ready_error_propagates_on_the_normal_path(make_napari_viewer):
+    """A failing slice-ready handler must not be swallowed outside teardown.
+
+    Connecting to the emitter directly used to re-raise (napari's
+    `EventEmitter` defaults to `ignore_callback_errors=False`), so draining
+    must too - otherwise a real slicing bug becomes a log line no test fails
+    on.
+    """
+    viewer = make_napari_viewer()
+    qt_viewer = viewer.window._qt_viewer
+
+    def boom(event):
+        raise RuntimeError('slice handling failed')
+
+    qt_viewer._on_slice_ready = boom
+    qt_viewer._slice_ready_events.put(_pending_ready_event())
+
+    with pytest.raises(RuntimeError, match='slice handling failed'):
+        qt_viewer._process_slice_ready_events()
+
+
+def test_slice_ready_errors_are_suppressed_during_teardown(
+    make_napari_viewer, caplog
+):
+    """Teardown wants the opposite: drain everything, raise nothing.
+
+    An exception escaping here would skip the rest of `Viewer.close`, and
+    skipped Qt teardown is itself a source of segfaults. The queue must still
+    end up empty, and the failure must still be reported somewhere.
+    """
+    viewer = make_napari_viewer()
+    qt_viewer = viewer.window._qt_viewer
+
+    seen = []
+
+    def boom(event):
+        seen.append(event)
+        raise RuntimeError('slice handling failed')
+
+    qt_viewer._on_slice_ready = boom
+    qt_viewer._slice_ready_events.put(_pending_ready_event())
+    qt_viewer._slice_ready_events.put(_pending_ready_event())
+
+    with caplog.at_level(logging.ERROR, logger='napari'):
+        qt_viewer._drain_slice_ready_events(suppress_errors=True)
+
+    # A failing event must not abort the drain of the ones behind it.
+    assert len(seen) == 2
+    assert qt_viewer._slice_ready_events.empty()
+    assert 'slice handling failed' in caplog.text
+
+
+def test_viewer_close_drains_pending_slice_ready(make_napari_viewer):
+    """`Viewer.close` flushes the queue *while the layers are still valid*.
+
+    `_layer_slicer.shutdown()` waits for in-flight computations, but the
+    queued hop to the main thread can still be pending, and `close` goes on to
+    `layers.clear()`. Note that asserting only "the event was drained" would
+    not catch a missing drain here: `QtViewer.closeEvent` drains too, and
+    `close()` reaches it via `self.window.close()` - just several steps *after*
+    clearing the layers. So assert what the layer list looked like at the
+    moment the event was handled, which is the thing that actually differs.
+    """
+    viewer = make_napari_viewer()
+    viewer.add_image(np.zeros((4, 5)))
+    qt_viewer = viewer.window._qt_viewer
+
+    layers_when_handled = []
+    qt_viewer._on_slice_ready = lambda event: layers_when_handled.append(
+        len(viewer.layers)
+    )
+    qt_viewer._slice_ready_events.put(_pending_ready_event())
+
+    viewer.close()
+
+    assert layers_when_handled == [1], (
+        'the pending slice-ready event was handled after the layers were '
+        f'cleared (layer counts seen: {layers_when_handled})'
+    )
+    assert qt_viewer._slice_ready_events.empty()
 
 
 def setup_viewer_for_async_slicing(
