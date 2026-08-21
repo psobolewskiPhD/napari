@@ -249,10 +249,16 @@ class QtViewer(QSplitter):
         self._slice_ready_events: queue.SimpleQueue[Event] = (
             queue.SimpleQueue()
         )
-        self._slice_ready_queued.connect(
-            self._process_slice_ready_events,
-            Qt.ConnectionType.QueuedConnection,
-        )
+        # Left at Qt's default `AutoConnection`, which is what this needs:
+        # cross-thread emissions are queued onto the receiver's thread and
+        # never run on the emitting one, and a same-thread emission is a
+        # direct call - matching what `ensure_main_thread` did before, since
+        # it too ran inline when already on the main thread. Spelling
+        # `QueuedConnection` explicitly is also untypeable: PyQt's stubs
+        # model `connect` as taking the slot alone, so both the positional
+        # and the `type=` form are mypy errors. Verified on PyQt6 6.10.0 and
+        # PySide6 6.10.3 that the default really does queue across threads.
+        self._slice_ready_queued.connect(self._process_slice_ready_events)
         self.viewer._layer_slicer.events.ready.connect(self._queue_slice_ready)
 
         self._on_active_change()
@@ -646,9 +652,10 @@ class QtViewer(QSplitter):
         May be called from `_layer_slicer`'s background slicing thread, so
         this must never construct or otherwise touch a Qt object directly -
         only plain, thread-safe Python. Emitting `_slice_ready_queued`
-        constructs nothing: the signal and its queued connection to
+        constructs nothing: the signal and its connection to
         `_process_slice_ready_events` already exist on the main thread, and
-        emitting one across threads is explicitly supported.
+        emitting one across threads is explicitly supported - Qt queues the
+        call onto the receiver's thread rather than running it here.
         """
         self._slice_ready_events.put(event)
         self._slice_ready_queued.emit()
@@ -658,7 +665,7 @@ class QtViewer(QSplitter):
         """Handle `_layer_slicer.events.ready` events queued by
         `_queue_slice_ready`.
 
-        This is the normal path, reached on the main thread via the queued
+        This is the normal path, reached on the main thread via the
         `_slice_ready_queued` connection made in `__init__`. Errors propagate,
         because that is what connecting to the emitter directly would have
         done: `EventEmitter._invoke_callback` defers to `_handle_exception`,
