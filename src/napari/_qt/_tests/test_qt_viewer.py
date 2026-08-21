@@ -756,6 +756,7 @@ def _update_data(
     qt_viewer: QtViewer,
     dtype: np.dtype = np.uint64,
     expected_middle_pixel: Sequence[int] | None = None,
+    atol: float = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Change layer data and return color of label and middle pixel of screenshot.
 
@@ -768,6 +769,13 @@ def _update_data(
     agree - a label whose colormap entry is transparent leaves the middle
     pixel opaque black - so that the wait is for a condition that can
     actually become true.
+
+    `atol` must match the tolerance the caller then asserts with. A poll that
+    is *looser* than the assertion is worse than no poll at all: it returns on
+    the first frame that is merely close, guaranteeing the assertion runs
+    against the worst frame that still satisfies the wait. The default of 0
+    demands exact agreement, which is what `npt.assert_almost_equal` on uint8
+    pixels needs; callers asserting `atol=1` pass `atol=1`.
     """
     layer.data = np.full((2, 2), label, dtype=dtype)
     layer.selected_label = label
@@ -800,7 +808,7 @@ def _update_data(
             # that renders transparent, and those callers say what they
             # expect via `expected_middle_pixel` instead.
             return False
-        return np.allclose(target, captured['middle_pixel'], atol=1)
+        return np.allclose(target, captured['middle_pixel'], rtol=0, atol=atol)
 
     # A fixed sleep here used to be enough for Qt to process the QtColorBox
     # update and the canvas repaint before the screenshot, but under CPU
@@ -808,10 +816,12 @@ def _update_data(
     # assumption. Poll for the canvas to catch up instead.
     #
     # On a genuine mismatch this deliberately falls through to the caller's
-    # assertions rather than raising a bare timeout: the poll's success
-    # condition and those assertions are the same comparison on the same
-    # captured values, so a timeout always produces a real assertion failure
-    # naming both colours - never a silent pass.
+    # assertions rather than raising a bare timeout: `atol` is the caller's
+    # own tolerance (see above), so the poll's success condition is exactly
+    # the comparison the caller then makes on the same captured values. A
+    # timeout therefore always produces a real assertion failure naming both
+    # colours - never a silent pass, and never a pass on a frame the caller
+    # would have rejected.
     #
     # The timeout is generous because one iteration is expensive where it
     # matters: on the macOS CI runner (software GL, four xdist workers) a
@@ -882,9 +892,11 @@ def test_label_colors_matching_widget_auto(
     for label in test_colors:
         # Change color & selected color to the same label
         color_box_color, middle_pixel = _update_data(
-            layer, label, qtbot, qt_viewer_with_controls, dtype
+            layer, label, qtbot, qt_viewer_with_controls, dtype, atol=1
         )
 
+        # atol matches the `atol=1` handed to _update_data: the poll waits for
+        # exactly the agreement asserted here, no looser.
         npt.assert_allclose(
             color_box_color, middle_pixel, atol=1, err_msg=f'label {label}'
         )
