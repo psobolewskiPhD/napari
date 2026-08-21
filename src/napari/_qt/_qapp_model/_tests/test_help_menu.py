@@ -149,7 +149,18 @@ def test_tour_escape_closes_regardless_of_focus(qtbot):
     tour.start()
     qtbot.waitUntil(lambda: tour._steps[tour._current].title == 'Only')
 
+    # Escape must close the tour even when some other widget -- not the
+    # tooltip -- holds keyboard focus. Assert against the *window's* focus
+    # widget rather than `QApplication.focusWidget()`: the latter is only
+    # populated while the window is OS-active, and on a shared display any
+    # sibling process showing a window (i.e. every xdist run) can take
+    # activation away, leaving it None forever. `QWidget.focusWidget()` on
+    # the top level reports which widget the window would focus, which is
+    # what this test actually needs to establish.
     other_widget.setFocus()
+    qtbot.waitUntil(lambda: window.focusWidget() is other_widget)
+    assert window.focusWidget() is not tour._tooltip
+
     qtbot.keyPress(other_widget, Qt.Key.Key_Escape)
     qtbot.waitUntil(lambda: not tour._active)
 
