@@ -19,10 +19,10 @@ from weakref import WeakSet, ref
 import numpy as np
 from qtpy.QtCore import (
     QCoreApplication,
-    QMetaObject,
     QObject,
     Qt,
     QUrl,
+    Signal,
     Slot,
 )
 from qtpy.QtGui import (
@@ -160,6 +160,16 @@ class QtViewer(QSplitter):
 
     _instances: ClassVar[WeakSet[QtViewer]] = WeakSet()
 
+    #: Emitted by `_queue_slice_ready` (possibly from the slicing thread) to
+    #: hand `_process_slice_ready_events` over to the main thread. Declared as
+    #: a real signal rather than reached by name through
+    #: `QMetaObject.invokeMethod`: the bindings resolve a signal/slot
+    #: connection once, at connect time, and raise if it cannot be made,
+    #: whereas a by-name invocation returns False and merely warns - which
+    #: would disable async slicing silently, in the one code path that is off
+    #: by default and so only covered by `_tests/test_async_slicing.py`.
+    _slice_ready_queued = Signal()
+
     def __init__(
         self,
         viewer: ViewerModel,
@@ -231,13 +241,17 @@ class QtViewer(QSplitter):
         # been observed to deadlock against the main thread doing its own
         # Qt object construction at the same time. `queue.SimpleQueue` is
         # plain Python and thread-safe with no Qt/GIL interaction beyond
-        # normal refcounting, so the slicing thread only ever touches that;
-        # `QMetaObject.invokeMethod` below targets `self`, which already
-        # exists and belongs to the main thread, so it doesn't construct
-        # anything new on the calling thread either - it's the sanctioned
-        # way to safely notify across threads in Qt.
+        # normal refcounting, so the slicing thread only ever touches that,
+        # and then emits `_slice_ready_queued`. Emitting an existing signal
+        # constructs nothing on the calling thread; the queued connection
+        # made here marshals the call onto the main thread, which is the
+        # sanctioned way to notify across threads in Qt.
         self._slice_ready_events: queue.SimpleQueue[Event] = (
             queue.SimpleQueue()
+        )
+        self._slice_ready_queued.connect(
+            self._process_slice_ready_events,
+            Qt.ConnectionType.QueuedConnection,
         )
         self.viewer._layer_slicer.events.ready.connect(self._queue_slice_ready)
 
@@ -631,16 +645,13 @@ class QtViewer(QSplitter):
 
         May be called from `_layer_slicer`'s background slicing thread, so
         this must never construct or otherwise touch a Qt object directly -
-        only plain, thread-safe Python. `QMetaObject.invokeMethod` targets
-        `self`, which already exists on the main thread, so it's safe to
-        call from any thread without constructing anything new here.
+        only plain, thread-safe Python. Emitting `_slice_ready_queued`
+        constructs nothing: the signal and its queued connection to
+        `_process_slice_ready_events` already exist on the main thread, and
+        emitting one across threads is explicitly supported.
         """
         self._slice_ready_events.put(event)
-        QMetaObject.invokeMethod(
-            self,
-            '_process_slice_ready_events',
-            Qt.ConnectionType.QueuedConnection,
-        )
+        self._slice_ready_queued.emit()
 
     @Slot()
     def _process_slice_ready_events(self) -> None:
@@ -648,12 +659,12 @@ class QtViewer(QSplitter):
         `_queue_slice_ready`.
 
         This is the normal path, reached on the main thread via the queued
-        connection `_queue_slice_ready` sets up. Errors propagate, because
-        that is what connecting to the emitter directly would have done:
-        `EventEmitter._invoke_callback` defers to `_handle_exception`, which
-        re-raises unless `ignore_callback_errors` is set, and it defaults to
-        False. Swallowing here instead would turn a real slicing bug into a
-        log line that no test fails on.
+        `_slice_ready_queued` connection made in `__init__`. Errors propagate,
+        because that is what connecting to the emitter directly would have
+        done: `EventEmitter._invoke_callback` defers to `_handle_exception`,
+        which re-raises unless `ignore_callback_errors` is set, and it
+        defaults to False. Swallowing here instead would turn a real slicing
+        bug into a log line that no test fails on.
 
         Teardown wants the opposite, and calls
         `_drain_slice_ready_events(suppress_errors=True)` directly.
