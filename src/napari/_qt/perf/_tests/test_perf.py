@@ -12,11 +12,7 @@ import pytest
 from pretend import stub
 
 from napari._qt.perf import qt_performance
-from napari._tests.utils import (
-    skip_local_popups,
-    skip_on_mac_ci,
-    skip_on_win_ci,
-)
+from napari._tests.utils import skip_local_popups, skip_on_win_ci
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,7 +65,6 @@ def perfmon_script(tmp_path):
 
 
 @skip_on_win_ci
-@skip_on_mac_ci
 @skip_local_popups
 @pytest.mark.usefixtures('qapp')
 def test_trace_on_start(tmp_path: Path, perf_config, perfmon_script):
@@ -78,7 +73,24 @@ def test_trace_on_start(tmp_path: Path, perf_config, perfmon_script):
     env = os.environ.copy()
     env.update({'NAPARI_PERFMON': str(perf_config.path), 'NAPARI_CONFIG': ''})
 
-    subprocess.run([sys.executable, *perfmon_script], env=env, check=True)
+    # `check=False` plus an explicit assert, rather than `check=True`: this
+    # spawns a whole napari process, and a `CalledProcessError` tells you only
+    # the exit code. When the child dies (a GL crash on a headless runner, an
+    # import error, a Qt plugin failure) the traceback it printed is the only
+    # useful evidence, and letting subprocess swallow it is what turns this
+    # into an undiagnosable flake worth skipping. Capture and report it.
+    result = subprocess.run(
+        [sys.executable, *perfmon_script],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f'perfmon script exited with {result.returncode}\n'
+        f'--- stdout ---\n{result.stdout}\n'
+        f'--- stderr ---\n{result.stderr}'
+    )
 
     # Make sure file exists and is not empty.
     assert perf_config.trace_path.exists(), 'Trace file not written'
