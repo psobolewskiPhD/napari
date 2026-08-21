@@ -295,17 +295,22 @@ def _auto_shutdown_dask_threadworkers():
     # so that leak doesn't cascade into failures across the rest of an
     # xdist worker's tests, but warn so the leak itself is still visible.
     if dask.threaded.default_pool is not None:
-        warnings.warn(
-            'dask.threaded.default_pool was not None at test start '
-            '(a previous test likely leaked it); resetting.',
-            stacklevel=2,
-        )
+        # Reset *first*, warn second. `filterwarnings` turns warnings raised
+        # from `napari` into errors, so warning first risks raising out of
+        # this fixture before the reset runs - which would leave the leak in
+        # place and cascade it across the rest of this worker's tests, i.e.
+        # exactly what the reset is here to prevent.
         if isinstance(dask.threaded.default_pool, ThreadPool):
             dask.threaded.default_pool.close()
             dask.threaded.default_pool.join()
         else:
             dask.threaded.default_pool.shutdown()
         dask.threaded.default_pool = None
+        warnings.warn(
+            'dask.threaded.default_pool was not None at test start '
+            '(a previous test likely leaked it); it has been reset.',
+            stacklevel=2,
+        )
 
     try:
         yield
@@ -332,10 +337,24 @@ def _auto_shutdown_zarr_iothread():
     try:
         yield
     finally:
-        from zarr.core.sync import cleanup_resources, loop
-
-        if loop[0] is not None:
-            cleanup_resources()
+        # `zarr.core.sync` is zarr's internal module, not public API, so pin
+        # the behaviour we rely on rather than let a zarr refactor turn every
+        # test's teardown into an ImportError: `loop` is a one-element list
+        # holding the lazily created event loop, and `cleanup_resources()`
+        # shuts it (and the executor) down and sets `loop[0]` back to None.
+        # Verified against zarr 3.x; `napari` requires zarr>=3.0.8.
+        try:
+            from zarr.core.sync import cleanup_resources, loop
+        except ImportError:  # pragma: no cover - zarr internals moved
+            warnings.warn(
+                'Could not reach zarr.core.sync to shut down its background '
+                'IO thread between tests; zarr internals have moved and this '
+                'fixture needs updating.',
+                stacklevel=2,
+            )
+        else:
+            if loop[0] is not None:
+                cleanup_resources()
 
 
 # this is not the proper way to configure IPython, but it's an easy one.
@@ -968,7 +987,10 @@ def _dangling_qthread_pool(monkeypatch, request):
 # protect. So it records what it had to force-stop, keyed per resource, and the
 # fixtures fold those records back into their own reports - see
 # `_FORCE_STOPPED_*_KEY` below.
-_PENDING_TIMERS_KEY: pytest.StashKey[list] = pytest.StashKey()
+#: `(started_timers, single_shot_timers)` from `_dangling_qtimers`. Both
+#: halves matter: a timer left running by `QTimer.start()` can fire into a
+#: torn-down test during pytest-qt's event pump exactly as a `singleShot` can.
+_PENDING_TIMERS_KEY: pytest.StashKey[tuple] = pytest.StashKey()
 _PENDING_THREADS_KEY: pytest.StashKey[WeakKeyDictionary] = pytest.StashKey()
 
 # Calling places of resources this hookimpl force-stopped, so that
@@ -1008,7 +1030,14 @@ def _is_live(qt_object, predicate_name: str) -> bool:
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_teardown(item, nextitem):
     stopped_timers = item.stash.setdefault(_FORCE_STOPPED_TIMERS_KEY, [])
-    for timer, calling in item.stash.get(_PENDING_TIMERS_KEY, []):
+    started_timers, single_shot_timers = item.stash.get(
+        _PENDING_TIMERS_KEY, ({}, [])
+    )
+    # `list()` the WeakKeyDictionary: stopping a timer can drop the last
+    # reference to another, and mutating it mid-iteration would raise.
+    for timer, calling in chain(
+        list(started_timers.items()), single_shot_timers
+    ):
         if _is_live(timer, 'isActive'):
             # record before stopping: a resource we then fail to stop matters
             # more, not less.
@@ -1032,7 +1061,7 @@ def _dangling_qtimers(monkeypatch, request):
     base_start = QTimer.start
     timer_dkt = WeakKeyDictionary()
     single_shot_list = []
-    request.node.stash[_PENDING_TIMERS_KEY] = single_shot_list
+    request.node.stash[_PENDING_TIMERS_KEY] = (timer_dkt, single_shot_list)
 
     if 'disable_qtimer_start' in request.keywords:
         from pytestqt.qt_compat import qt_api
