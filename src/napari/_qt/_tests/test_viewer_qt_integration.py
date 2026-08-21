@@ -16,7 +16,6 @@ from qtpy.QtWidgets import QApplication
 from napari._qt._tests.test_qt_viewer import qt_viewer
 from napari._tests.utils import (
     skip_local_popups,
-    skip_on_mac_xdist,
     skip_on_win_ci,
 )
 from napari.settings import get_settings
@@ -353,27 +352,35 @@ def test_qt_viewer_toggle_console(make_napari_viewer):
 
 
 @skip_local_popups
-@skip_on_mac_xdist
 @pytest.mark.skipif(os.environ.get('MIN_REQ', '0') == '1', reason='min req')
 def test_qt_viewer_console_focus(qtbot, make_napari_viewer):
-    """Test console has focus when instantiating from viewer."""
+    """Test console is given focus when instantiated from the viewer.
+
+    Checks the window's focus widget rather than ``console.hasFocus()``.
+    ``hasFocus()`` is ``QApplication.focusWidget() is self``, which is only
+    true while the window is *active* - and on a shared display exactly one
+    window can be active, so any sibling process showing a window (every
+    xdist run) can take activation away and make it False forever. What
+    napari actually controls is which widget the window would focus once
+    activated, and ``QWidget.focusWidget()`` on the top level reports
+    precisely that, independent of activation.
+    """
     viewer = make_napari_viewer(show=True)
     view = viewer.window._qt_viewer
-    assert not view.console.hasFocus(), 'console has focus before being shown'
-
-    def console_has_focus():
-        assert view.console.hasFocus(), (
-            'console does not have focus when shown'
-        )
-
-    window = viewer.window._qt_window
-    # An exposed window may still belong to an inactive application.
-    window.raise_()
-    window.activateWindow()
-    qtbot.waitUntil(window.isActiveWindow, timeout=5000)
+    window = view.window()
+    assert window.focusWidget() is not view.console, (
+        'console has focus before being shown'
+    )
 
     view.toggle_console_visibility(None)
-    qtbot.waitUntil(console_has_focus)
+
+    def console_is_window_focus_widget():
+        assert window.focusWidget() is view.console, (
+            'console was not given focus when shown; window focus widget '
+            f'is {window.focusWidget()!r}'
+        )
+
+    qtbot.waitUntil(console_is_window_focus_widget)
 
 
 @skip_on_win_ci
