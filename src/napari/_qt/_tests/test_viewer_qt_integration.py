@@ -484,17 +484,22 @@ def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
     clipboard_image = QGuiApplication.clipboard().image()
     assert clipboard_image.isNull()
 
-    # Capture once - this also triggers the flash animation, exactly once.
-    # Retrying the clipboard *write* below must not re-trigger it, since
-    # add_flash_animation() doesn't stop a still-running previous one, so
-    # a second call here could leak a dangling QPropertyAnimation.
-    img = viewer.window._screenshot(flash=True)
+    # Capture the whole window through the production API - which is what
+    # this test exists to cover - triggering the flash animation exactly
+    # once.
+    viewer.window.clipboard(flash=True)
 
-    def _set_clipboard():
-        QGuiApplication.clipboard().setImage(img)
+    def _whole_window_copied():
+        # Same shared-X11-selection retry as `_copy_canvas_only` above, but
+        # the retry must use flash=False: add_flash_animation() does not stop
+        # a still-running previous animation, so a second flash=True call
+        # could leak a dangling QPropertyAnimation. The flash assertions
+        # below therefore still describe the single flash=True call.
+        if QGuiApplication.clipboard().image().isNull():
+            viewer.window.clipboard(flash=False)
         return not QGuiApplication.clipboard().image().isNull()
 
-    qtbot.waitUntil(_set_clipboard, timeout=2000)
+    qtbot.waitUntil(_whole_window_copied, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
