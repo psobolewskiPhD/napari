@@ -41,12 +41,23 @@ def test_windows_grouping_overwrite(qapp):
 
 def test_run_outside_ipython(make_napari_viewer, qapp, monkeypatch):
     """Test that we don't incorrectly give ipython the event loop."""
-    # `IPython.get_ipython()` is a process-global singleton shell; an
-    # earlier test in this worker process (e.g. one using the embedded Qt
-    # console) can leave its `active_eventloop` set to 'qt', which this
-    # test would otherwise see. Simulate a plain, non-notebook environment.
-    monkeypatch.setitem(sys.modules, 'IPython', None)
+    # `IPython.get_ipython()` is a process-global singleton shell; an earlier
+    # test in this worker process (e.g. one using the embedded Qt console) can
+    # leave its `active_eventloop` set to 'qt', which this test would
+    # otherwise see. Reset just that one piece of leaked state.
+    #
+    # Deliberately *not* by hiding the module (e.g.
+    # `monkeypatch.setitem(sys.modules, 'IPython', None)`):
+    # `_ipython_has_eventloop` returns False on its first line when IPython
+    # is absent, so every assertion below would become a tautology that
+    # cannot fail no matter what napari does to the event loop.
+    if (ipy_module := sys.modules.get('IPython')) is not None and (
+        shell := ipy_module.get_ipython()
+    ) is not None:
+        monkeypatch.setattr(shell, 'active_eventloop', None)
 
+    # Still reachable through the real code path: module found, shell found,
+    # and `active_eventloop != 'qt'` is what makes this False.
     assert not _ipython_has_eventloop()
     v1 = make_napari_viewer()
     assert not _ipython_has_eventloop()
