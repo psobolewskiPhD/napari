@@ -82,6 +82,11 @@ def _wait_for_canvas_settled(qtbot, viewer) -> None:
     """
     from time import monotonic
 
+    # Only a timeout is expected and ignorable below (see above); anything
+    # else - a deleted canvas, a bug in the predicate - is a real problem and
+    # must not be swallowed by this optimisation.
+    from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
+
     try:
         scene_canvas = viewer.window._qt_viewer.canvas._scene_canvas
     except AttributeError:  # pragma: no cover - custom ViewerClass
@@ -95,7 +100,7 @@ def _wait_for_canvas_settled(qtbot, viewer) -> None:
 
     scene_canvas.events.resize.connect(_on_resize)
     try:
-        with suppress(Exception):
+        with suppress(QtBotTimeoutError):
             qtbot.waitUntil(
                 lambda: (monotonic() - last_resize) * 1000 >= _CANVAS_QUIET_MS,
                 timeout=_CANVAS_SETTLE_TIMEOUT_MS,
@@ -142,8 +147,14 @@ def fail_obj_graph(Klass):  # pragma: no cover
         leaked_objects_count = len(Klass._instances)
 
         gc.collect()
+        # COUNTER is per *process*, so under pytest-xdist two workers leaking
+        # the same class would both write `<Klass>-leak-backref-graph-1.pdf`
+        # into the same directory and clobber each other - leaving a CI
+        # artifact that is the wrong worker's graph, or half of two. Namespace
+        # it by worker; `PYTEST_XDIST_WORKER` is unset when not distributing.
+        worker = os.environ.get('PYTEST_XDIST_WORKER', 'main')
         file_path = Path(
-            f'{Klass.__name__}-leak-backref-graph-{COUNTER}.pdf'
+            f'{Klass.__name__}-leak-backref-graph-{worker}-{COUNTER}.pdf'
         ).absolute()
         objgraph.show_backrefs(
             list(Klass._instances),
