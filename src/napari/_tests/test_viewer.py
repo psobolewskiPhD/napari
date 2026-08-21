@@ -32,7 +32,15 @@ def _get_provider_actions(type_):
     # @pytest.mark.parametrize below, and a set of functions iterates in
     # id()-dependent (process-dependent) order, which desyncs collection
     # across pytest-xdist worker processes.
-    return sorted(actions, key=lambda action: action.__name__)
+    #
+    # The key has to be fully qualifying, not just `__name__`: two providers
+    # can contribute commands of the same name, `sorted` leaves ties in the
+    # set's own order, and pytest then disambiguates the duplicate IDs by
+    # appending indices in that same order - so a `__name__`-only key would
+    # leave exactly the desync it is meant to remove.
+    return sorted(
+        actions, key=lambda action: (action.__module__, action.__qualname__)
+    )
 
 
 def _assert_shortcuts_exist_for_each_action(type_):
