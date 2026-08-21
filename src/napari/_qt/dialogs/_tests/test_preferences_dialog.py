@@ -62,6 +62,31 @@ def pref(qtbot):
     return dlg
 
 
+TOGGLE_VISIBILITY_ACTION = 'napari:toggle_selected_visibility'
+
+
+def _row_for_action(shortcut_widget, action_name: str) -> int:
+    """Return the shortcut table row holding ``action_name``.
+
+    The table is built with ``enumerate(actions.items())``, so a row index is
+    only meaningful for one particular set of registered actions - and that set
+    grows as earlier tests create viewers and layers. Hard-coding an index made
+    these tests pass only when their file-mates had run first and shifted the
+    wanted action onto that row; run alone they read a different action's
+    keybinding. The action name is kept in the hidden ``_action_col`` for
+    exactly this kind of lookup.
+    """
+    table = shortcut_widget._table
+    for row in range(table.rowCount()):
+        item = table.item(row, shortcut_widget._action_col)
+        if item is not None and item.text() == action_name:
+            return row
+    raise AssertionError(
+        f'{action_name!r} is not in the shortcut table '
+        f'({table.rowCount()} rows)'
+    )
+
+
 def test_prefdialog_populated(pref):
     subfields = filter(
         lambda f: (
@@ -321,11 +346,11 @@ def test_preferences_dialog_restore(qtbot, pref, monkeypatch):
     assert get_settings().shortcuts.shortcuts[
         'napari:toggle_selected_visibility'
     ] == [KeyBinding.from_str('U')]
+    row = _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION)
     assert KeyBinding.from_str(
         Shortcut.parse_platform(
-            # 12 is the row for 'napari:toggle_selected_visibility'
             shortcut_widget._table.item(
-                12, shortcut_widget._shortcut_col
+                row, shortcut_widget._shortcut_col
             ).text()
         )
     ) == KeyBinding.from_str('U')
@@ -345,8 +370,7 @@ def test_preferences_dialog_restore(qtbot, pref, monkeypatch):
     assert KeyBinding.from_str(
         Shortcut.parse_platform(
             shortcut_widget._table.item(
-                # 12 is the row index for 'napari:toggle_selected_visibility'
-                12,
+                _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION),
                 shortcut_widget._shortcut_col,
             ).text()
         )
@@ -381,21 +405,20 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
     pref.activateWindow()
     qtbot.waitActive(pref)
     assert pref.isVisible()
-    # 12 is the row for 'napari:toggle_selected_visibility'
+    row = _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION)
     shortcut = shortcut_widget._table.item(
-        12, shortcut_widget._shortcut_col
+        row, shortcut_widget._shortcut_col
     ).text()
     assert shortcut == 'U'
 
     x = shortcut_widget._table.columnViewportPosition(
         shortcut_widget._shortcut_col
     )
-    # 12 is the row for 'napari:toggle_selected_visibility'
-    y = shortcut_widget._table.rowViewportPosition(12)
+    y = shortcut_widget._table.rowViewportPosition(row)
 
     item_pos = QPoint(x, y)
     model_index = shortcut_widget._table.model().index(
-        12, shortcut_widget._shortcut_col
+        row, shortcut_widget._shortcut_col
     )
 
     def _open_editor() -> bool:
@@ -458,7 +481,7 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
 
     # verify that the keybind is changed
     shortcut = shortcut_widget._table.item(
-        12, shortcut_widget._shortcut_col
+        row, shortcut_widget._shortcut_col
     ).text()
     assert shortcut == ''
 
