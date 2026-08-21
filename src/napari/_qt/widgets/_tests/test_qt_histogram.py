@@ -552,7 +552,7 @@ def _full_data_counts(base, hist, clims_range):
     return ground_truth.astype(np.int64)
 
 
-def test_two_views_share_single_worker_and_both_animate(qtbot):
+def test_two_views_share_single_worker_and_both_animate(qtbot, monkeypatch):
     """Two histogram views on one layer (inline + popup) share a single
     compute worker, yet *both* animate progressively — regardless of which
     view owns the worker.
@@ -593,35 +593,95 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
     view_b.histogram_visual.set_data = count_b
 
     hist = layer.histogram
+
+    # Gate every chunk load, so the worker cannot outrun the main thread.
+    #
+    # A draw count taken from an ungated worker is not merely late but
+    # *lossy*: `_on_partial_histogram` returns early when
+    # `_histogram._dirty` is False, and finishing the compute clears
+    # `_dirty`, so a backlog of queued partials is discarded rather than
+    # delayed. Measured by blocking the main thread for 1.5s while the worker
+    # ran, draws went from {'a': 64, 'b': 64} to {'a': 1, 'b': 1} - and with
+    # the two views starting at different times, to {'a': 1, 'b': 2}. That is
+    # how a plain `draws > 1` failed on macOS CI, and no timeout recovers a
+    # dropped signal.
+    #
+    # So don't observe the animation, *drive* it: release one chunk at a time
+    # and wait for both views to redraw before releasing the next. "Both views
+    # animate progressively" then becomes an enforced sequence with an exact
+    # expected draw count, rather than a race with a weakened assertion.
+    permits = threading.Semaphore(0)
+    entered_first_load = threading.Event()
+    ungated_loads: list[int] = []
+    real_load_chunk = HistogramModel._load_chunk
+
+    def gated_load_chunk(data, flat_idx):
+        entered_first_load.set()
+        # A timeout rather than a bare wait, so a regression that loads more
+        # chunks than this test released fails the test instead of hanging
+        # the suite.
+        if not permits.acquire(timeout=30):
+            ungated_loads.append(int(flat_idx))
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(gated_load_chunk)
+    )
+
     layer.histogram.enabled = True  # triggers the shared async compute
+
+    # The worker is now parked in its first gated chunk load, so no partial
+    # can have been emitted yet. Baseline the counters here and compare
+    # deltas: that isolates partial-driven redraws from any draw the
+    # `enabled` change itself caused, and from the two views having been
+    # constructed at different times.
+    qtbot.waitUntil(entered_first_load.is_set, timeout=15000)
+    baseline = dict(draws)
+
+    n_gated = 3
+    for expected in range(1, n_gated + 1):
+        permits.release()
+
+        # The assertions live *inside* the callback so pytest-qt chains them
+        # as the cause of its own TimeoutError: a view that stops animating
+        # then reports which view stalled and after how many chunks, rather
+        # than a bare 'waitUntil timed out'.
+        def _both_views_redrew(expected=expected):
+            assert draws['a'] - baseline['a'] >= expected, (
+                f'view_a stopped animating at chunk {expected}: '
+                f'{draws} from {baseline}'
+            )
+            assert draws['b'] - baseline['b'] >= expected, (
+                f'view_b stopped animating at chunk {expected}: '
+                f'{draws} from {baseline}'
+            )
+
+        qtbot.waitUntil(_both_views_redrew, timeout=15000)
+
+    # Each released chunk yields exactly one partial, which the owning view
+    # writes into the shared model and broadcasts, redrawing *both* views
+    # exactly once. Equal, progressive, and not just non-blank.
+    assert draws['a'] - baseline['a'] == n_gated, (
+        f'view_a did not animate once per chunk: {draws} from {baseline}'
+    )
+    assert draws['b'] - baseline['b'] == n_gated, (
+        f'view_b did not animate once per chunk: {draws} from {baseline}'
+    )
+
+    # Let every remaining chunk through so the compute finishes. Derived from
+    # the array rather than hard-coded, and any spare permits are simply never
+    # acquired - while a compute that wants *more* chunk loads than the array
+    # has is recorded in `ungated_loads` and asserted on below.
+    permits.release(layer.data.npartitions)
 
     qtbot.waitUntil(
         lambda: not hist._compute_scheduled and not hist._dirty,
         timeout=15000,
     )
 
-    # Neither view was left blank. That is the deterministic core of the
-    # regression this guards - the popup showed nothing at all while the
-    # inline view rendered.
-    #
-    # Deliberately not `draws[...] > 1`, nor `draws['a'] == draws['b']`.
-    # Both are races between the worker producing chunks and the main thread
-    # dispatching the queued `yielded` signals, and the draw count is not
-    # merely late but *lossy*: `_on_partial_histogram` returns early when
-    # `_histogram._dirty` is False, and finishing the compute clears
-    # `_dirty`, so a backlog of partials is discarded rather than delayed.
-    # Measured by blocking the main thread for 1.5s while the worker runs,
-    # draws goes from {'a': 64, 'b': 64} to {'a': 1, 'b': 1} - and with the
-    # two views starting at different times, to {'a': 1, 'b': 2}. That is
-    # what failed on macOS CI, and no timeout recovers a dropped signal; a
-    # `qtbot.wait(50)` and then a `waitUntil` both tried and both failed.
-    #
-    # The progressive animation and the broadcast-to-every-view behaviour are
-    # covered deterministically by
-    # `test_partial_histogram_broadcasts_to_all_views` below, which drives the
-    # partial path instead of racing it.
-    assert draws['a'] >= 1, f'view_a never rendered: {draws}'
-    assert draws['b'] >= 1, f'view_b never rendered: {draws}'
+    assert not ungated_loads, (
+        f'chunks were loaded without waiting for a permit: {ungated_loads}'
+    )
     # Single-worker invariant held to completion — nothing left dangling.
     assert not hist._compute_scheduled
     assert view_a._compute_worker is None
@@ -645,13 +705,12 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
 def test_partial_histogram_broadcasts_to_all_views(qtbot):
     """A partial result from one view's worker redraws *every* view.
 
-    This is the progressive-animation half of
-    `test_two_views_share_single_worker_and_both_animate`, driven directly
-    rather than raced. Going through the real worker makes the draw count a
-    function of how promptly the main thread services the queued `yielded`
-    signals - and `_on_partial_histogram` drops partials once
-    `_histogram._dirty` is cleared by the compute finishing, so a starved
-    main thread loses them outright instead of merely arriving late.
+    Narrower than `test_two_views_share_single_worker_and_both_animate`, and
+    complementary to it: that test drives the same broadcast through the real
+    `GeneratorWorker` (gating its chunk loads so the sequence is enforced),
+    while this one calls `_on_partial_histogram` directly. So it still covers
+    the broadcast if the worker plumbing changes shape, with no threading
+    involved at all.
     """
     dask = pytest.importorskip('dask.array')
     base = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
