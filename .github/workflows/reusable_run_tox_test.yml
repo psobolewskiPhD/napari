@@ -213,6 +213,13 @@ jobs:
 
       - name: Upload pytest timing reports as json ${{ inputs.platform }} py ${{ inputs.python_version }} ${{ inputs.toxenv || inputs.qt_backend }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # Unlike the two uploads above, this one is not `if: failure()`, so it
+        # runs on green jobs too - and without this a hiccup reaching GitHub's
+        # artifact service fails the whole job. Seen as
+        # `Failed to CreateArtifact: Unable to make request: ENOTFOUND` on a
+        # macos-15-intel job whose 5322 tests had all passed. The report is a
+        # diagnostic; losing it should be an annotation, not a red run.
+        continue-on-error: true
         with:
           name: upload pytest timing json ${{ inputs.platform }} py ${{ inputs.python_version }} ${{ inputs.toxenv || inputs.qt_backend }} ${{ inputs.tox_extras }} ${{ inputs.artifacts_suffix }}
           path: |
