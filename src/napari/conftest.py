@@ -1027,8 +1027,14 @@ def _is_live(qt_object, predicate_name: str) -> bool:
         return False
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_runtest_teardown(item, nextitem):
+def force_stop_pending_qt_resources(item):
+    """Stop timers/threads this test left running, before anything pumps events.
+
+    Registered as a `tryfirst` `pytest_runtest_teardown` hook by
+    `src/conftest.py`, so that it covers `napari_builtins` too. Deliberately
+    not a hook here: a conftest only applies below its own directory, and
+    defining it in both places would register it twice.
+    """
     stopped_timers = item.stash.setdefault(_FORCE_STOPPED_TIMERS_KEY, [])
     started_timers, single_shot_timers = item.stash.get(
         _PENDING_TIMERS_KEY, ({}, [])
@@ -1214,8 +1220,16 @@ def _dangling_qanimations(monkeypatch, request):
     dangling_animations = []
 
     for animation, calling in animation_dkt.items():
-        if animation.state() == QPropertyAnimation.Running:
-            dangling_animations.append((animation, calling))
+        # Guard the state read, not just the `stop()` below: a flash animation
+        # that already finished has had its C++ object deleted by
+        # `remove_flash_animation`, and `state()` then raises RuntimeError.
+        # A deleted animation is by definition not still running. This only
+        # surfaced once `napari_builtins`' Qt tests started being checked -
+        # five of its `test_features_table` tests errored here, none of them
+        # actually leaking anything.
+        with suppress(RuntimeError):
+            if animation.state() == QPropertyAnimation.Running:
+                dangling_animations.append((animation, calling))
 
     for animation, _ in dangling_animations:
         with suppress(RuntimeError):
@@ -1553,8 +1567,11 @@ def _reset_colormaps(monkeypatch):
     colormap_utils.AVAILABLE_COLORMAPS.update(prev)
 
 
-def pytest_runtest_setup(item):
+def apply_leak_detection_fixtures(item):
     """Add Qt leak detection fixtures *only* in tests using the qapp fixture.
+
+    Registered as a `pytest_runtest_setup` hook by `src/conftest.py` rather
+    than here, so it covers `napari_builtins` as well - see that file.
 
     Because we have headless test suite that does not include Qt, we cannot
     simply use `@pytest.fixture(autouse=True)` on all our fixtures for
