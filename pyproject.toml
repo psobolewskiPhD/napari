@@ -527,7 +527,12 @@ faulthandler_timeout = 600
 faulthandler_exit_on_timeout = true
 # log_cli_level = "INFO"
 xfail_strict = true
-testpaths = ["napari", "napari_builtins"]
+# Relative to rootdir, so these have to include `src/` since the
+# src-layout move. When they do not resolve, pytest warns
+# ("No files were found in testpaths") and silently falls back to a
+# recursive search from the *current directory* - which collected the
+# same 5400 tests only because of where tox happens to invoke it.
+testpaths = ["src/napari", "src/napari_builtins"]
 #pythonpath = "src"
 
 
