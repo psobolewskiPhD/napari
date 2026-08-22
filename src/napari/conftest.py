@@ -1402,7 +1402,7 @@ def _describe_dangling_widgets(request, creation_places) -> str:
             f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
         )
         lines.append(
-            f'  created at: {creation_places.get(widget, "<unknown - constructed before this fixture was active>")}'
+            f'  created at: {creation_places.get(widget, "<unknown - built before any tracked test, or by a class whose __init__ is not patched>")}'
         )
         for ref in gc.get_referrers(widget):
             if (
@@ -1421,24 +1421,80 @@ def _describe_dangling_widgets(request, creation_places) -> str:
     return '\n'.join(lines)
 
 
+#: Classes whose `__init__` is patched to record where a widget was built.
+#:
+#: `QWidget` alone is enough on PyQt and not on PySide, so patch the bases
+#: explicitly rather than rely on either. PyQt resolves a subclass's
+#: `__init__` through the MRO, so one patch on `QWidget` catches everything;
+#: Shiboken gives each class its own `__init__`, which ends the chain.
+#: Measured, patching only `QWidget`:
+#:
+#:   PyQt6 6.10.0    misses nothing
+#:   PySide6 6.10.3  misses QMainWindow, QDialog, QDockWidget, QLabel,
+#:                   QPushButton, and any subclass of those
+#:
+#: `_QtMainWindow` subclasses `QMainWindow`, so on PySide6 the tracker was
+#: blind to the widget it is most often asked about.
+_TRACKED_WIDGET_BASES = (
+    'QWidget',
+    'QMainWindow',
+    'QDialog',
+    'QDockWidget',
+    'QMenu',
+)
+
+
+#: Creation places, keyed weakly by widget and **shared across the session**.
+#:
+#: Deliberately not per-test. The widget this check reports is very often one
+#: an *earlier* test leaked - a failing test's retained traceback pins its
+#: widgets, and the next test is the one that notices - so a per-test record
+#: can only ever answer "constructed before this fixture was active", which is
+#: true and useless. Seen exactly that way on CI: a leaked `_QtMainWindow`
+#: reported against `test_restart`, built by the `test_screenshot_to_clipboard`
+#: that failed immediately before it. Weak keys, so nothing is retained.
+_WIDGET_CREATION_PLACES: WeakKeyDictionary = WeakKeyDictionary()
+
+
 @pytest.fixture
 def _find_dangling_widgets(request, qtbot, monkeypatch):
     # `gc.get_referrers()` only walks one level, so a widget kept alive by an
     # indirect referrer (e.g. captured in a mock's call args) can show up with
-    # no apparent referrer at all. Record where every QWidget was constructed
+    # no apparent referrer at all. Record where every widget was constructed
     # as a fallback, mirroring how
     # `_dangling_qthreads`/`_dangling_qtimers`/`_dangling_qthread_pool`
     # already track their resource's calling place.
-    from qtpy.QtWidgets import QWidget
+    from qtpy import QtWidgets
 
-    creation_places: WeakKeyDictionary = WeakKeyDictionary()
-    base_init = QWidget.__init__
+    creation_places = _WIDGET_CREATION_PLACES
 
-    def init_with_tracking(self, *args, **kwargs):
-        base_init(self, *args, **kwargs)
-        creation_places[self] = _get_calling_place()
+    def _tracking_init(klass, base_init):
+        def init_with_tracking(self, *args, **kwargs):
+            base_init(self, *args, **kwargs)
+            # Only the first (outermost) patched `__init__` to run records,
+            # so the place named is the one that built the concrete widget
+            # rather than a base class reached on the way down.
+            if self not in creation_places:
+                creation_places[self] = _get_calling_place()
 
-    monkeypatch.setattr(QWidget, '__init__', init_with_tracking)
+        return init_with_tracking
+
+    installed: list = []
+    for name in _TRACKED_WIDGET_BASES:
+        klass = getattr(QtWidgets, name)
+        current = klass.__init__
+        # Skip a class that already inherits a patch installed above, rather
+        # than wrapping the wrapper: the inner one would then record the outer
+        # one's frame in `conftest.py` instead of the line that built the
+        # widget. On PyQt every one of these resolves to
+        # `sip.simplewrapper.__init__`, so patching `QWidget` covers the whole
+        # hierarchy and the rest are skipped; on PySide each class has its own
+        # `__init__`, so each is patched exactly once.
+        if any(current is wrapper for wrapper in installed):
+            continue
+        wrapper = _tracking_init(klass, current)
+        installed.append(wrapper)
+        monkeypatch.setattr(klass, '__init__', wrapper)
 
     yield
 
