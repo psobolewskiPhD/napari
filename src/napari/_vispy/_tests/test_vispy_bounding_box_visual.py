@@ -122,9 +122,6 @@ def test_bounding_box_multiscale_2D_zoom_stable(make_napari_viewer, qtbot):
     assert len(seen_states) > 1
 
 
-@pytest.mark.skipif(
-    sys.platform == 'win32', reason='This new test is flaky on windows'
-)
 @pytest.mark.parametrize(
     'zooms',
     [(0.2, 1.0, 4.0), (4.0, 1.0, 0.2), (1.0, 0.2, 1.0), (4.0,)],
