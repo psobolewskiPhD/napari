@@ -1,6 +1,7 @@
 """For testing the Help menu"""
 
 import sys
+from time import sleep
 from types import SimpleNamespace
 from unittest import mock
 
@@ -23,14 +24,59 @@ from napari._qt.widgets.qt_viewer_tour import (
     resolve_tour_target,
 )
 
+#: Retry/timeout policy for the live help-URL check below.
+#:
+#: This is the only test in the suite that talks to a third-party web service,
+#: and it had neither a timeout nor a retry. A timeout matters here more than
+#: usual: without one, an unresponsive server stalls the worker until
+#: `faulthandler_timeout` (600s) kills it, turning a remote hiccup into a
+#: crashed worker.
+_URL_ATTEMPTS = 3
+_URL_RETRY_WAIT_S = 2
+_URL_TIMEOUT_S = 30
+
 
 @pytest.mark.parametrize('url', HELP_URLS.keys())
 def test_help_urls(url):
+    """Every help menu entry must point at a URL that exists.
+
+    Deliberately discriminates by status class rather than treating any
+    non-2xx as a failure. What this test is for is whether napari ships a
+    *correct* URL: a 4xx answers that (the link is wrong, and that is napari's
+    bug), while a 5xx does not - it says the server was unwell at that moment
+    and nothing about the link. Seen on CI as a transient
+    `503 Service Unavailable` from napari.org for `getting_started`, on a
+    commit where every one of these URLs was reachable minutes later.
+
+    So: retry a few times, fail on 4xx, and skip rather than fail if the
+    server is still unwell. A skip is honest about what happened; a failure
+    would be a claim about napari that the evidence does not support.
+    """
     if url == 'release_notes':
         pytest.skip('No release notes for dev version')
 
-    r = requests.head(HELP_URLS[url])
-    r.raise_for_status()
+    target = HELP_URLS[url]
+    for attempt in range(1, _URL_ATTEMPTS + 1):
+        try:
+            response = requests.head(target, timeout=_URL_TIMEOUT_S)
+        except requests.RequestException as exc:
+            problem = f'{type(exc).__name__}: {exc}'
+        else:
+            if response.status_code < 500:
+                # 2xx/3xx pass; raise_for_status turns a 4xx into the
+                # failure it should be.
+                response.raise_for_status()
+                return
+            problem = f'{response.status_code} {response.reason}'
+
+        if attempt < _URL_ATTEMPTS:
+            sleep(_URL_RETRY_WAIT_S)
+
+    pytest.skip(
+        f'{target} was unreachable after {_URL_ATTEMPTS} attempts '
+        f'({problem}). This test cannot tell a wrong URL from a server '
+        'outage, and only the former is a napari bug.'
+    )
 
 
 @pytest.mark.parametrize(
