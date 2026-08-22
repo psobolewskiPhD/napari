@@ -1358,6 +1358,23 @@ def _short_repr(obj: object, limit: int = 200) -> str:
     )
 
 
+def _keys_holding(container: object, target: object) -> list:
+    """Names of the slots in `container` that refer to `target`, if any.
+
+    Only dicts, lists and tuples: those cover the containers that actually
+    show up here (a mock's `call_args`, a frame's locals, a registry) and are
+    cheap and safe to walk. Anything raising is simply not described.
+    """
+    try:
+        if isinstance(container, dict):
+            return [k for k, v in container.items() if v is target]
+        if isinstance(container, (list, tuple)):
+            return [i for i, v in enumerate(container) if v is target]
+    except Exception:  # noqa: BLE001 - diagnostics must not raise
+        pass
+    return []
+
+
 def _describe_dangling_widgets(request, creation_places) -> str:
     """Return a description of leaked top-level widgets, or '' if there are none.
 
@@ -1453,6 +1470,15 @@ def _describe_dangling_widgets(request, creation_places) -> str:
             ):
                 continue
             lines.append(f'  referrer: {_short_repr(ref)}')
+            # A container's truncated repr often cuts off exactly the part
+            # that matters - which slot holds the widget. Name it. Seen on
+            # min_req, where a leaked FeaturesTable's only referrer was a
+            # dict whose repr was cut off before reaching the widget, leaving
+            # the holder unidentifiable from the log alone.
+            lines.extend(
+                f'    held at key: {key!r}'
+                for key in _keys_holding(ref, widget)
+            )
 
     for widget in problematic_widgets:
         widget.setObjectName('handled_widget')
