@@ -1606,6 +1606,28 @@ def apply_leak_detection_fixtures(item):
         )
 
 
+def pytest_runtest_setup(item):
+    """Register the leak detectors for items under ``src/napari``.
+
+    Deliberately a thin delegation rather than the logic itself: a conftest
+    only applies to items below its own directory, so ``napari_builtins`` has
+    an identical pair of hooks in its own conftest, delegating to the same
+    helpers. The trees are disjoint, so pluggy never registers two
+    implementations for one item - which it would if a shared parent conftest
+    also defined them.
+    """
+    apply_leak_detection_fixtures(item)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    """See `pytest_runtest_setup` above; `tryfirst` is load-bearing.
+
+    It must run before pytest-qt's own teardown hookimpl pumps the event loop.
+    """
+    force_stop_pending_qt_resources(item)
+
+
 class NapariTerminalReporter(CustomTerminalReporter):
     """
     This ia s custom terminal reporter to how long it takes to finish given part of tests.
