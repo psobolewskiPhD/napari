@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from pandas.core.generic import pandas_dtype
-from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt
+from qtpy.QtCore import QItemSelection, QItemSelectionModel, QMimeData, Qt
 from qtpy.QtGui import QGuiApplication
 from qtpy.QtWidgets import (
     QAbstractItemDelegate,
@@ -237,6 +237,59 @@ def test_features_table_save_csv(qtbot, tmp_path, monkeypatch):
     pd.testing.assert_frame_equal(pd.read_csv(path, index_col=0), df)
 
 
+@pytest.fixture
+def _private_clipboard(monkeypatch):
+    """Give this test a clipboard no other process can touch.
+
+    The clipboard is one resource shared by every process on the display, and
+    this test round-trips through it three times: napari writes and the test
+    reads, then the test writes and napari reads. Under pytest-xdist a
+    concurrently running worker can take ownership between any write and its
+    read - and on X11 the write can fail outright
+    (`QXcbClipboard::setMimeData: Cannot set X11 selection owner`) with no
+    retry from Qt.
+
+    A retry cannot fix this test the way it fixed the others. One of its three
+    assertions is that pressing 'c' *without* Ctrl leaves the clipboard
+    untouched, and there is no way to retry the absence of an event; a foreign
+    write in that window is indistinguishable from napari copying when it
+    should not have.
+
+    Nor is it needed: what this test checks is `FeaturesTable`'s key handling
+    and its TSV serialisation, not Qt's clipboard integration. So keep the data
+    in-process, where no other worker can reach it. Patching `QGuiApplication`
+    covers the production code (`features_table.py` uses
+    `QGuiApplication.clipboard()`) and the `qapp.clipboard()` calls below,
+    since `QApplication` inherits the method rather than defining its own.
+    A plain class rather than a Mock: patching a method of a QObject subclass
+    with a Mock upsets PySide6's metaobject introspection.
+    """
+
+    class _LocalClipboard:
+        def __init__(self):
+            self._mime = QMimeData()
+
+        def text(self, *_):
+            return self._mime.text()
+
+        def setText(self, text, *_):
+            self._mime = QMimeData()
+            self._mime.setText(text)
+
+        def mimeData(self, *_):
+            return self._mime
+
+        def setMimeData(self, mime_data, *_):
+            self._mime = mime_data
+
+        def clear(self, *_):
+            self._mime = QMimeData()
+
+    clipboard = _LocalClipboard()
+    monkeypatch.setattr(QGuiApplication, 'clipboard', lambda *_: clipboard)
+
+
+@pytest.mark.usefixtures('_private_clipboard')
 def test_features_table_copy_paste(qtbot, qapp):
     v = ViewerModel()
     w = FeaturesTable(v)
