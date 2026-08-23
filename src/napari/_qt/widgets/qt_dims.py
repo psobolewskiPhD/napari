@@ -379,8 +379,20 @@ class QtDims(QWidget):
         # Qt fatally aborts if a QThread is destroyed while still running,
         # and `_animation_thread` is a child of this widget, so a still-
         # playing animation must be stopped (and joined) before `deleteLater`
-        # can be allowed to destroy it. Guarded on `isRunning()` since this
-        # runs on every viewer close, and the vast majority never played.
+        # can be allowed to destroy it.
+        #
+        # Note this does NOT cover the production teardown path. Qt delivers
+        # `closeEvent` only to the widget being closed, not to its children,
+        # and nothing in napari calls `QtDims.close()` - so on a real
+        # `Viewer.close()` this method never runs (measured: zero times), and
+        # the `QtDims` is destroyed as a child of the `QtViewer` instead.
+        # There, the only thing that stops the thread first is the
+        # `self.dims.stop()` in `QtViewer.closeEvent`, which discards the
+        # bool below. Until that call site checks it too, the guard here
+        # protects the tests that close a `QtDims` directly, not users.
+        #
+        # Still guarded on `isRunning()`: the check is cheap and the vast
+        # majority of widgets reaching here never played.
         if self._animation_thread.isRunning() and not self.stop():
             # `stop()`'s wait is bounded, so it can return with the thread
             # still running. Proceeding to `deleteLater()` would then abort
