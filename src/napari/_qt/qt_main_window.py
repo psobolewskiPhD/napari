@@ -1710,7 +1710,13 @@ class Window:
                 'canvas_only screenshots.'
             )
 
-        # Part 2: take the screenshot
+        # Part 2: make sure what we are about to capture is current. The
+        # canvas branch would do this itself, but `grab()` reads whatever the
+        # widgets have already painted, so the non-canvas branch needs it too -
+        # it previously did not wait for slicing at all (napari/napari#8033).
+        self._qt_viewer._flush_pending_slices()
+
+        # Part 3: take the screenshot
         if canvas_only:
             img = self._qt_viewer._screenshot(
                 flash=flash,

@@ -266,6 +266,45 @@ def _pending_ready_event() -> Event:
     return Event('ready', value={})
 
 
+@pytest.mark.usefixtures('_enable_async')
+def test_screenshot_shows_the_slice_it_waited_for(make_napari_viewer):
+    """`screenshot()` must not capture the frame before the pending slice.
+
+    Regression test for napari/napari#8033. `_screenshot` called
+    `wait_until_idle`, which waits for the slicing *futures* - but the response
+    is handed to the main thread through
+    `_queue_slice_ready`/`_process_slice_ready_events`, so a finished future can
+    still have its result sitting in the queue, unapplied. The screenshot then
+    showed the previous slice.
+
+    Asserted on pixel content rather than by diffing two screenshots: a second
+    capture can be taken at a different canvas size if the window manager
+    resizes in between, which fails for reasons unrelated to slicing.
+    """
+    viewer = make_napari_viewer(show=True)
+    # Two slices that cannot be confused: one black, one white.
+    data = np.zeros((2, 32, 32), dtype=np.uint8)
+    data[1] = 255
+    viewer.add_image(data, contrast_limits=[0, 255])
+    viewer.dims.current_step = (0, 0, 0)
+
+    def centre_value(screenshot: np.ndarray) -> float:
+        h, w = screenshot.shape[:2]
+        centre = screenshot[h // 2 - 2 : h // 2 + 2, w // 2 - 2 : w // 2 + 2]
+        return centre[..., :3].mean()
+
+    # Establish that the black slice is what is on screen to begin with, so a
+    # stale capture below is a real staleness and not just a dark canvas.
+    assert centre_value(viewer.screenshot(canvas_only=True, flash=False)) < 64
+
+    viewer.dims.current_step = (1, 0, 0)
+    # No event pumping here on purpose: this is exactly the user-facing call
+    # from the issue, and it must flush what it needs by itself.
+    assert (
+        centre_value(viewer.screenshot(canvas_only=True, flash=False)) > 192
+    ), 'screenshot captured the previous slice'
+
+
 def test_slice_ready_hops_to_the_main_thread(make_napari_viewer, qtbot):
     """`_queue_slice_ready` may run on the slicing thread; the handler may not.
 

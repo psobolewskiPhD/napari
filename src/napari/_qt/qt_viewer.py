@@ -1016,6 +1016,31 @@ class QtViewer(QSplitter):
             imsave(str(path), img)
         return img
 
+    def _flush_pending_slices(self, timeout: float = 5) -> None:
+        """Block until pending slices are computed *and shown on the canvas*.
+
+        `wait_until_idle` only waits for the slicing futures. Since the slice
+        response is handed to the main thread through
+        `_queue_slice_ready`/`_process_slice_ready_events`, a future can be
+        done while its result is still sitting in `_slice_ready_events`, not
+        yet applied to any visual. Anything that reads pixels has to drain that
+        queue too, or it captures the previous frame - see napari/napari#8033,
+        where a screenshot taken straight after a dims change reproducibly
+        returned the *old* slice, byte for byte, 7 times out of 7.
+
+        With async slicing off there is nothing to drain: the ready event is
+        emitted on the main thread, so the connection runs inline and the
+        visual is already up to date.
+        """
+        try:
+            self.viewer._layer_slicer.wait_until_idle(timeout=timeout)
+        except TimeoutError as e:  # pragma: no cover
+            raise TimeoutError(
+                'Slicing was too slow. Wait for all layers to load before taking a screenshot, '
+                'or disable async slicing in Preferences->Experimental.'
+            ) from e
+        self._process_slice_ready_events()
+
     def _screenshot(
         self,
         flash: bool = True,
@@ -1052,13 +1077,7 @@ class QtViewer(QSplitter):
                 f'screenshot size must be 2 values, got {len(size)}'
             )
 
-        try:
-            self.viewer._layer_slicer.wait_until_idle(timeout=5)
-        except TimeoutError as e:  # pragma: no cover
-            raise TimeoutError(
-                'Slicing was too slow. Wait for all layers to load before taking a screenshot, '
-                'or disable async slicing in Preferences->Experimental.'
-            ) from e
+        self._flush_pending_slices()
 
         if fit_to_data_extent:
             # Use the same scene parameter calculations as in viewer_model.fit_to_view
