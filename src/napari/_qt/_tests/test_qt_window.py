@@ -65,7 +65,9 @@ def test_shutdown_stops_worker_threads(make_napari_viewer):
 
     with (
         patch.object(window.status_thread, 'close_terminate') as stop_status,
-        patch.object(window._qt_viewer.dims, 'stop') as stop_animation,
+        patch.object(
+            window._qt_viewer.dims, '_stop_before_destroy'
+        ) as stop_animation,
     ):
         _shutdown_open_windows()
 

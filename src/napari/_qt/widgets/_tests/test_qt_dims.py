@@ -487,6 +487,28 @@ def test_close_does_not_join_when_no_animation_ran(qtbot, parented_qt_dims):
     assert stop_calls == []
 
 
+def test_stop_before_destroy_finishes_join_after_bounded_wait_times_out(
+    parented_qt_dims, monkeypatch, caplog
+):
+    """Destruction must not proceed after the bounded wait times out."""
+    qt_dims = parented_qt_dims
+    thread = qt_dims._animation_thread
+    waits = []
+
+    monkeypatch.setattr(thread, 'isRunning', lambda: True)
+    monkeypatch.setattr(qt_dims, 'stop', lambda: False)
+    monkeypatch.setattr(
+        thread, 'wait', lambda *args: waits.append(args) or True
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        qt_dims._stop_before_destroy()
+
+    assert waits == [()]
+    assert 'waited until it finished before closing' in caplog.text
+
+
 def test_play_popup_stays_open_on_enter(qtbot, qt_dims):
     qt_dims.dims.ndim = 3
     qtbot.addWidget(qt_dims)

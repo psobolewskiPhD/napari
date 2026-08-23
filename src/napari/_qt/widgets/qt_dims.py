@@ -1,3 +1,4 @@
+import logging
 import warnings
 
 import numpy as np
@@ -15,6 +16,8 @@ from napari.settings._constants import LoopMode
 #: because `stop()` is also called from ordinary UI-update paths, where an
 #: unbounded wait would stall the GUI.
 _ANIMATION_STOP_TIMEOUT_MS = 2000
+
+logger = logging.getLogger(__name__)
 
 
 class QtDims(QWidget):
@@ -346,6 +349,25 @@ class QtDims(QWidget):
         self._animation_thread._stop()
         return self._animation_thread.wait(_ANIMATION_STOP_TIMEOUT_MS)
 
+    def _stop_before_destroy(self) -> None:
+        """Stop and fully join the animation thread before destroying it.
+
+        Unlike :meth:`stop`, this method may wait without a timeout. It is only
+        for teardown paths, where returning with a running child ``QThread``
+        would let Qt destroy that thread and fatally abort the process.
+        """
+        if not self._animation_thread.isRunning() or self.stop():
+            return
+
+        # Restore the pre-bounded-wait safety invariant before reporting the
+        # delay: diagnostics must never precede the safety-critical join.
+        self._animation_thread.wait()
+        logger.warning(
+            'Axis animation thread did not stop within %dms of being asked '
+            'to; teardown waited until it finished before closing.',
+            _ANIMATION_STOP_TIMEOUT_MS,
+        )
+
     @property
     def is_playing(self):
         """Return True if any axis is currently animated."""
@@ -380,31 +402,7 @@ class QtDims(QWidget):
         # and `_animation_thread` is a child of this widget, so a still-
         # playing animation must be stopped (and joined) before `deleteLater`
         # can be allowed to destroy it.
-        #
-        # Note this does NOT cover the production teardown path. Qt delivers
-        # `closeEvent` only to the widget being closed, not to its children,
-        # and nothing in napari calls `QtDims.close()` - so on a real
-        # `Viewer.close()` this method never runs (measured: zero times), and
-        # the `QtDims` is destroyed as a child of the `QtViewer` instead.
-        # There, the only thing that stops the thread first is the
-        # `self.dims.stop()` in `QtViewer.closeEvent`, which discards the
-        # bool below. Until that call site checks it too, the guard here
-        # protects the tests that close a `QtDims` directly, not users.
-        #
-        # Still guarded on `isRunning()`: the check is cheap and the vast
-        # majority of widgets reaching here never played.
-        if self._animation_thread.isRunning() and not self.stop():
-            # `stop()`'s wait is bounded, so it can return with the thread
-            # still running. Proceeding to `deleteLater()` would then abort
-            # the process, and silently - so say what happened first.
-            warnings.warn(
-                'Axis animation thread did not stop within '
-                f'{_ANIMATION_STOP_TIMEOUT_MS}ms of being asked to; closing '
-                'anyway. If the process aborts immediately after this, that '
-                'is why.',
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        self._stop_before_destroy()
         [w.deleteLater() for w in self.slider_widgets]
         self.deleteLater()
         event.accept()

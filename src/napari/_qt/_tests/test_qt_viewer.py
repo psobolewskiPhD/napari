@@ -676,6 +676,28 @@ def test_create_non_empty_viewer_model(qtbot: QtBot) -> None:
     gc.collect()
 
 
+@pytest.mark.allow_animation_thread
+def test_close_joins_dims_animation_thread(
+    qtbot: QtBot, qt_viewer: QtViewer
+) -> None:
+    """The real viewer teardown path must join its child animation thread."""
+    qt_viewer.viewer.dims.ndim = 3
+    qt_viewer.viewer.dims.set_range(0, (0, 10, 1))
+    qt_viewer.dims.play(0, fps=20)
+    qtbot.waitUntil(qt_viewer.dims._animation_thread.isRunning)
+    thread = qt_viewer.dims._animation_thread
+
+    # Exercise QtViewer's teardown boundary without deleting fixture-owned
+    # widgets that pytest-qt still needs to close during fixture teardown.
+    with (
+        mock.patch.object(qt_viewer.canvas, 'delete'),
+        mock.patch.object(qt_viewer.dockConsole, 'deleteLater'),
+    ):
+        qt_viewer.closeEvent(None)
+
+    assert not thread.isRunning()
+
+
 def test_qt_viewer_canvas_is_nested_in_main_widget(
     qt_viewer: QtViewer,
 ) -> None:

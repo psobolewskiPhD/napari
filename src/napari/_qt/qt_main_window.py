@@ -500,7 +500,7 @@ class _QtMainWindow(QMainWindow):
             self._quit_app = quit_app
             self._is_close_dialog[quit_app] = True
             # here we inform that confirmation dialog is not open
-            self._qt_viewer.dims.stop()
+            self._qt_viewer.dims._stop_before_destroy()
             return super().close()
         self._is_close_dialog[quit_app] = True
         return None
@@ -654,7 +654,7 @@ class _QtMainWindow(QMainWindow):
     def _stop_worker_threads(self) -> None:
         self.status_thread.close_terminate()
         self.status_thread.wait()
-        self._qt_viewer.dims.stop()
+        self._qt_viewer.dims._stop_before_destroy()
 
     def restart(self):
         """Restart the napari application in a detached process."""
