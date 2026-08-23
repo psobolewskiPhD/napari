@@ -380,6 +380,12 @@ def test_features_table_copy_paste(qtbot, qapp):
         (pd.CategoricalDtype(['x', 'y']), 'x', 'x', QComboBox, 'y'),
     ],
 )
+# `22-07-2025` is ambiguous to `pd.to_datetime`, which is the point - the
+# test pins how the table renders and edits a `datetime64[ns]` column. Old
+# pandas (through at least 1.5.3) warns about the DD/MM/YYYY guess, and
+# `error:::napari` in `pyproject.toml` turns that into a failure on the
+# min_req job. Modern pandas does not warn, so this only bites the floor.
+@pytest.mark.filterwarnings('ignore:Parsing dates in DD/MM/YYYY format')
 def test_features_tables_dtypes(
     dtype, val, rendered_val, editor_class, new_val, qtbot
 ):
