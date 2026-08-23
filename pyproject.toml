@@ -162,7 +162,9 @@ testing = [
     "lxml[html_clean]>5",
     "matplotlib >= 3.6.1",
     "pooch>=1.6.0",
-    "coverage>7",
+    # >=7.10 for `[tool.coverage.run] patch`, which is what makes coverage
+    # work under xdist - see the comment there.
+    "coverage>=7.10",
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
@@ -255,7 +257,9 @@ testing = [
     "lxml[html_clean]>5",
     "matplotlib >= 3.6.1",
     "pooch>=1.6.0",
-    "coverage>7",
+    # >=7.10 for `[tool.coverage.run] patch`, which is what makes coverage
+    # work under xdist - see the comment there.
+    "coverage>=7.10",
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
@@ -979,6 +983,21 @@ exclude_lines = [
 ]
 
 [tool.coverage.run]
+# xdist workers are separate processes spawned by execnet, and a parent's
+# tracer does not propagate into a child - so `coverage run -m pytest -n N`
+# measures only the controller. That is not a small loss: the controller does
+# collection-time imports and no test bodies, so the whole suite reports about
+# what a single test file does. `patch = subprocess` writes the .pth files and
+# sets the environment variables that start coverage inside each child before
+# it imports anything, which restores parity with a non-xdist run.
+#
+# Measured on one file, combined as CI does: no xdist gives 136 lines in the
+# test body and 143 in the module under test; `-n 4` without this gives 0 and
+# 108; `-n 4` with it gives 136 and 143.
+#
+# This measures *all* subprocesses, not only xdist workers, so a test that
+# shells out to Python now contributes coverage it did not before.
+patch = ["subprocess"]
 omit = [
     "*/_vendor/*",
     "*/_version.py",
