@@ -594,6 +594,16 @@ class AnimationThread(QThread):
     def run(self):
         self.work()
 
+    def start(
+        self,
+        priority: QThread.Priority = QThread.Priority.InheritPriority,
+    ) -> None:
+        """Reset the stop event before the worker can begin running."""
+        if self.isRunning():
+            return
+        self._waiter.clear()
+        super().start(priority)
+
     @property
     def slider(self) -> QtDimSliderWidget | None:
         """Return the slider for this animation thread."""
@@ -643,7 +653,6 @@ class AnimationThread(QThread):
         else:
             # immediately advance one frame
             self.advance()
-        self._waiter.clear()
         self._waiter.wait(self.interval / 1000)
         while not self._waiter.is_set():
             self.advance()

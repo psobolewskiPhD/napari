@@ -3,6 +3,7 @@ from weakref import ref
 
 import numpy as np
 import pytest
+from qtpy.QtCore import QThread
 
 from napari._qt.widgets.qt_dims_slider import AnimationThread
 from napari.settings._constants import LoopMode
@@ -109,6 +110,25 @@ def test_animation_thread_once(qt_dims, qtbot):
     ):
         worker.start()
     assert worker.current == worker.nz
+
+
+def test_animation_thread_start_accepts_priority(qt_dims, qtbot):
+    with make_worker(qt_dims, qtbot, nframes=1000) as worker:
+        worker.start(QThread.Priority.LowPriority)
+        qtbot.waitUntil(worker.isRunning)
+        assert worker.priority() == QThread.Priority.LowPriority
+        worker._stop()
+        assert worker.wait(2000)
+
+
+def test_animation_thread_redundant_start_preserves_stop(monkeypatch):
+    worker = AnimationThread()
+    worker._stop()
+    monkeypatch.setattr(worker, 'isRunning', lambda: True)
+
+    worker.start()
+
+    assert worker._waiter.is_set()
 
 
 @pytest.fixture
