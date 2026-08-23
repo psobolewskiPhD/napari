@@ -250,6 +250,14 @@ class Viewer(ViewerModel):
         image : array
             Numpy array of type ubyte and shape (h, w, 4). Index [0, 0] is the
             upper-left corner of the rendered region.
+
+        Raises
+        ------
+        TimeoutError
+            If async slicing is enabled and a pending slice does not arrive in
+            time. Waiting for it is what stops a stale frame being captured
+            (napari/napari#8033), so this is reported rather than silently
+            returning the previous slice.
         """
         return self.window.screenshot(
             path=path,

@@ -282,6 +282,17 @@ def _fresh_settings(monkeypatch):
     return
 
 
+def _reset_dask_threadpool() -> None:
+    """Shut down `dask.threaded.default_pool` and clear it, if there is one."""
+    pool = dask.threaded.default_pool
+    if isinstance(pool, ThreadPool):
+        pool.close()
+        pool.join()
+    elif pool is not None:
+        pool.shutdown()
+    dask.threaded.default_pool = None
+
+
 @pytest.fixture(autouse=True)
 def _auto_shutdown_dask_threadworkers():
     """
@@ -290,22 +301,19 @@ def _auto_shutdown_dask_threadworkers():
     We don't assert the number of threads in unchanged as other things
     modify the number of threads.
     """
-    # This fixture's own `finally` below always resets the pool, so a
-    # leftover one here means a previous test leaked it. Reset defensively
-    # so that leak doesn't cascade into failures across the rest of an
-    # xdist worker's tests, but warn so the leak itself is still visible.
+    # This fixture's own `finally` below always resets the pool, so a leftover
+    # one here means a previous test leaked it. Reset defensively so that leak
+    # doesn't cascade into failures across the rest of an xdist worker's
+    # tests, but report it so it is still visible.
     if dask.threaded.default_pool is not None:
-        # Reset *first*, warn second. `filterwarnings` turns warnings raised
-        # from `napari` into errors, so warning first risks raising out of
-        # this fixture before the reset runs - which would leave the leak in
-        # place and cascade it across the rest of this worker's tests, i.e.
-        # exactly what the reset is here to prevent.
-        if isinstance(dask.threaded.default_pool, ThreadPool):
-            dask.threaded.default_pool.close()
-            dask.threaded.default_pool.join()
-        else:
-            dask.threaded.default_pool.shutdown()
-        dask.threaded.default_pool = None
+        _reset_dask_threadpool()
+        # A warning rather than an assertion, so the reset above stands: the
+        # whole point is that one test's leak must not fail every later test
+        # on this worker. Note `filterwarnings`' `error:::napari` does not
+        # escalate this one - a `stacklevel=2` warning raised from a fixture
+        # body is attributed to `_pytest`, not to napari - so it lands in the
+        # run's warning summary rather than failing the innocent test that
+        # happened to run next.
         warnings.warn(
             'dask.threaded.default_pool was not None at test start '
             '(a previous test likely leaked it); it has been reset.',
@@ -315,12 +323,7 @@ def _auto_shutdown_dask_threadworkers():
     try:
         yield
     finally:
-        if isinstance(dask.threaded.default_pool, ThreadPool):
-            dask.threaded.default_pool.close()
-            dask.threaded.default_pool.join()
-        elif dask.threaded.default_pool:
-            dask.threaded.default_pool.shutdown()
-        dask.threaded.default_pool = None
+        _reset_dask_threadpool()
 
 
 @pytest.fixture(autouse=True)
@@ -337,24 +340,31 @@ def _auto_shutdown_zarr_iothread():
     try:
         yield
     finally:
-        # `zarr.core.sync` is zarr's internal module, not public API, so pin
-        # the behaviour we rely on rather than let a zarr refactor turn every
-        # test's teardown into an ImportError: `loop` is a one-element list
-        # holding the lazily created event loop, and `cleanup_resources()`
-        # shuts it (and the executor) down and sets `loop[0]` back to None.
-        # Verified against zarr 3.x; `napari` requires zarr>=3.0.8.
-        try:
-            from zarr.core.sync import cleanup_resources, loop
-        except ImportError:  # pragma: no cover - zarr internals moved
-            warnings.warn(
-                'Could not reach zarr.core.sync to shut down its background '
-                'IO thread between tests; zarr internals have moved and this '
-                'fixture needs updating.',
-                stacklevel=2,
-            )
-        else:
-            if loop[0] is not None:
-                cleanup_resources()
+        # Nothing to do unless zarr's sync machinery was actually imported:
+        # the loop lives inside that module and is created lazily, so a test
+        # that never touched zarr cannot have one. Checking `sys.modules`
+        # rather than importing keeps every unrelated test's teardown from
+        # pulling zarr in.
+        if 'zarr.core.sync' in sys.modules:
+            # `zarr.core.sync` is zarr's internal module, not public API, so
+            # pin the behaviour we rely on rather than let a zarr refactor
+            # turn every test's teardown into an ImportError: `loop` is a
+            # one-element list holding the lazily created event loop, and
+            # `cleanup_resources()` shuts it (and the executor) down and sets
+            # `loop[0]` back to None. Verified against zarr 3.x; `napari`
+            # requires zarr>=3.0.8.
+            try:
+                from zarr.core.sync import cleanup_resources, loop
+            except ImportError:  # pragma: no cover - zarr internals moved
+                warnings.warn(
+                    'Could not reach zarr.core.sync to shut down its '
+                    'background IO thread between tests; zarr internals have '
+                    'moved and this fixture needs updating.',
+                    stacklevel=2,
+                )
+            else:
+                if loop[0] is not None:
+                    cleanup_resources()
 
 
 # this is not the proper way to configure IPython, but it's an easy one.
@@ -1030,10 +1040,11 @@ def _is_live(qt_object, predicate_name: str) -> bool:
 def force_stop_pending_qt_resources(item):
     """Stop timers/threads this test left running, before anything pumps events.
 
-    Registered as a `tryfirst` `pytest_runtest_teardown` hook by
-    `src/conftest.py`, so that it covers `napari_builtins` too. Deliberately
-    not a hook here: a conftest only applies below its own directory, and
-    defining it in both places would register it twice.
+    Called from the `tryfirst` `pytest_runtest_teardown` hookimpls at the
+    bottom of this file and in `napari_builtins/conftest.py`. A conftest only
+    applies to items below its own directory, so `napari_builtins` needs its
+    own hook rather than inheriting this one - see `pytest_runtest_setup`
+    below for why that does not double-register.
     """
     stopped_timers = item.stash.setdefault(_FORCE_STOPPED_TIMERS_KEY, [])
     started_timers, single_shot_timers = item.stash.get(
@@ -1126,7 +1137,11 @@ def _dangling_qtimers(monkeypatch, request):
     dangling_timers = []
 
     for timer, calling in chain(timer_dkt.items(), single_shot_list):
-        if timer.isActive():
+        # `_is_live` rather than a bare `isActive()`: a timer whose C++ object
+        # has already been deleted raises RuntimeError from that call, and a
+        # deleted timer is by definition not still active. Same guard
+        # `_dangling_qanimations` needed for its `state()` read.
+        if _is_live(timer, 'isActive'):
             dangling_timers.append((timer, calling))
 
     for timer, _ in dangling_timers:
@@ -1596,8 +1611,9 @@ def _reset_colormaps(monkeypatch):
 def apply_leak_detection_fixtures(item):
     """Add Qt leak detection fixtures *only* in tests using the qapp fixture.
 
-    Registered as a `pytest_runtest_setup` hook by `src/conftest.py` rather
-    than here, so it covers `napari_builtins` as well - see that file.
+    Called from the `pytest_runtest_setup` hookimpls at the bottom of this
+    file and in `napari_builtins/conftest.py`, so it covers both trees - see
+    `pytest_runtest_setup` below for why there are two.
 
     Because we have headless test suite that does not include Qt, we cannot
     simply use `@pytest.fixture(autouse=True)` on all our fixtures for

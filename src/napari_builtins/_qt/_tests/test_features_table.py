@@ -19,6 +19,16 @@ from napari import layers
 from napari.components import ViewerModel
 from napari_builtins._qt.features_table import FeaturesTable, PandasModel
 
+# Several tests below call `w.toggle.click()`, which starts a QToggleSwitch
+# handle animation in superqt. Nothing here asserts on that animation, and if
+# teardown beats it the dangling-animation check fires *and* the still-running
+# animation keeps the parentless FeaturesTable alive, so the dangling-widget
+# check fires too - one cause, two errors, seen on the contended min_req job.
+# Those tests carry `@pytest.mark.disable_qanimation_start`, which makes
+# `QPropertyAnimation.start` a no-op: deterministic, rather than a longer wait.
+# `click()` still flips `isChecked()` and still emits `toggled`, which is all
+# these tests rely on.
+
 
 @pytest.mark.usefixtures('qapp')
 def test_pandas_model():
@@ -193,14 +203,6 @@ def test_features_table_selection_shapes(qtbot):
     assert layer.selected_data == {1}
 
 
-# `w.toggle.click()` below starts a QToggleSwitch handle animation in
-# superqt; nothing here asserts on it, and if teardown beats it the
-# dangling-animation check fires *and* the still-running animation keeps
-# the parentless FeaturesTable alive, so the dangling-widget check fires
-# too - one cause, two errors, seen on the contended min_req job. The
-# marker makes `QPropertyAnimation.start` a no-op, which is deterministic
-# rather than a longer wait; `click()` still flips `isChecked()` and still
-# emits `toggled`, which is all these tests rely on.
 @pytest.mark.disable_qanimation_start
 def test_features_table_edit(qtbot):
     v = ViewerModel()
@@ -298,14 +300,6 @@ def _private_clipboard(monkeypatch):
     monkeypatch.setattr(QGuiApplication, 'clipboard', lambda *_: clipboard)
 
 
-# `w.toggle.click()` below starts a QToggleSwitch handle animation in
-# superqt; nothing here asserts on it, and if teardown beats it the
-# dangling-animation check fires *and* the still-running animation keeps
-# the parentless FeaturesTable alive, so the dangling-widget check fires
-# too - one cause, two errors, seen on the contended min_req job. The
-# marker makes `QPropertyAnimation.start` a no-op, which is deterministic
-# rather than a longer wait; `click()` still flips `isChecked()` and still
-# emits `toggled`, which is all these tests rely on.
 @pytest.mark.disable_qanimation_start
 @pytest.mark.usefixtures('_private_clipboard')
 def test_features_table_copy_paste(qtbot, qapp):
@@ -354,14 +348,6 @@ def test_features_table_copy_paste(qtbot, qapp):
     np.testing.assert_array_equal(layer.features.iloc[2], [3, 8])
 
 
-# `w.toggle.click()` below starts a QToggleSwitch handle animation in
-# superqt; nothing here asserts on it, and if teardown beats it the
-# dangling-animation check fires *and* the still-running animation keeps
-# the parentless FeaturesTable alive, so the dangling-widget check fires
-# too - one cause, two errors, seen on the contended min_req job. The
-# marker makes `QPropertyAnimation.start` a no-op, which is deterministic
-# rather than a longer wait; `click()` still flips `isChecked()` and still
-# emits `toggled`, which is all these tests rely on.
 @pytest.mark.disable_qanimation_start
 @pytest.mark.parametrize(
     ('dtype', 'val', 'rendered_val', 'editor_class', 'new_val'),
@@ -525,14 +511,6 @@ def _add_all_supported_layers(viewer, include=None):
     return layers_dict
 
 
-# `w.toggle.click()` below starts a QToggleSwitch handle animation in
-# superqt; nothing here asserts on it, and if teardown beats it the
-# dangling-animation check fires *and* the still-running animation keeps
-# the parentless FeaturesTable alive, so the dangling-widget check fires
-# too - one cause, two errors, seen on the contended min_req job. The
-# marker makes `QPropertyAnimation.start` a no-op, which is deterministic
-# rather than a longer wait; `click()` still flips `isChecked()` and still
-# emits `toggled`, which is all these tests rely on.
 @pytest.mark.disable_qanimation_start
 def test_features_table_multilayer_table_concat(qtbot):
     """
@@ -659,14 +637,6 @@ def test_features_table_multilayer_table_selection(qtbot):
     assert shapes_layer.selected_data == {1}
 
 
-# `w.toggle.click()` below starts a QToggleSwitch handle animation in
-# superqt; nothing here asserts on it, and if teardown beats it the
-# dangling-animation check fires *and* the still-running animation keeps
-# the parentless FeaturesTable alive, so the dangling-widget check fires
-# too - one cause, two errors, seen on the contended min_req job. The
-# marker makes `QPropertyAnimation.start` a no-op, which is deterministic
-# rather than a longer wait; `click()` still flips `isChecked()` and still
-# emits `toggled`, which is all these tests rely on.
 @pytest.mark.disable_qanimation_start
 def test_features_table_multilayer_edit(qtbot):
     v = ViewerModel()

@@ -546,12 +546,11 @@ def test_blending_modes_with_canvas(make_napari_viewer):
     viewer.window._qt_viewer.canvas.size = shape
     viewer.scene.camera.zoom = 1
 
-    # Pass size=shape so screenshot() resizes the canvas through
-    # QtViewer.resize_canvas, which divides by devicePixelRatio - without
-    # it, the returned array is in physical pixels and only matches shape
-    # on standard-DPI displays.
-
-    # check that additive behaves correctly with black canvas
+    # check that additive behaves correctly with black canvas.
+    # Every screenshot below passes size=shape so that screenshot() resizes the
+    # canvas through QtViewer.resize_canvas, which divides by devicePixelRatio;
+    # without it the returned array is in physical pixels and only matches
+    # `shape` on a standard-DPI display.
     img1_layer.blending = 'additive'
     img2_layer.blending = 'additive'
     screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
