@@ -444,72 +444,54 @@ def test_screenshot(make_napari_viewer, qapp, qtbot):
 @pytest.mark.slow
 @skip_on_win_ci
 def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
+    """`flash=True` must flash the widget whose contents were captured.
+
+    Deliberately asserts nothing about what lands on the clipboard. That round
+    trip - both `canvas_only` variants, with the retry it needs because X11
+    selection ownership is shared across every process on the display - is
+    covered by `test_qt_viewer_clipboard_without_flash` below.
+
+    Keeping it out of here is what makes this test safe rather than merely
+    ordered. A flash lives for `add_flash_animation`'s 300ms, and any retry
+    loop between the call and the assertion pumps the Qt event loop, so it can
+    outlive the flash: measured locally at ~5ms per `canvas_only` copy plus
+    pytest-qt's 10ms poll interval, about 20 retries. It then fails as
+    `assert None is not None`, which reads as a broken flash rather than as a
+    slow clipboard - and sends the reader into `add_flash_animation`, which is
+    fine. The flash is independent of the clipboard write anyway:
+    `Window.clipboard` flashes inside `_screenshot`, before `setImage`.
+    """
     viewer = make_napari_viewer()
-    # make sure clipboard is empty
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
 
+    def assert_flashing(widget) -> None:
+        # `add_flash_animation` sets both of these synchronously, so this is
+        # asserted immediately after the call on purpose - deferring it is the
+        # race described in the docstring. It looks trivial and is not: it is
+        # the only check that `clipboard(flash=True)` wires `flash` through.
+        assert widget.graphicsEffect() is not None, (
+            f'clipboard(flash=True) did not flash {type(widget).__name__}'
+        )
+        assert hasattr(widget, '_flash_animation')
+
+    def wait_flash_finished(widget) -> None:
+        # Not merely coverage: `_dangling_qanimations` reports a still-running
+        # QPropertyAnimation at teardown as a leak, and under `--dist loadfile`
+        # that report lands on whichever test in this file runs next. Polling
+        # for the removal rather than waiting on the animation's `finished`
+        # signal, because `remove_flash_animation` may already have deleted the
+        # animation by the time we could connect to it.
+        qtbot.waitUntil(lambda: not hasattr(widget, '_flash_animation'))
+        assert widget.graphicsEffect() is None
+
+    # the canvas, through QtViewer (flashes the QtViewer itself)
     viewer.window._qt_viewer.clipboard(flash=True)
+    assert_flashing(viewer.window._qt_viewer)
+    wait_flash_finished(viewer.window._qt_viewer)
 
-    def _copy_canvas_only():
-        # Setting the X11 clipboard selection owner is a shared,
-        # process-wide resource; under xdist's concurrent worker processes
-        # on one Xvfb display it can fail outright ("Cannot set X11
-        # selection owner") with no internal retry from Qt, so retry the
-        # copy itself instead of just waiting for an image that will
-        # never arrive on its own. flash=False here, so retrying doesn't
-        # risk leaking flash animations.
-        viewer.window.clipboard(flash=False, canvas_only=True)
-        return not QGuiApplication.clipboard().image().isNull()
-
-    qtbot.waitUntil(_copy_canvas_only, timeout=2000)
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert not clipboard_image.isNull()
-
-    # ensure the flash effect is applied
-    assert viewer.window._qt_viewer.graphicsEffect() is not None
-    assert hasattr(viewer.window._qt_viewer, '_flash_animation')
-    # Wait for the animation to finish. We cannot wait on its `finished`
-    # signal, as `remove_flash_animation` may already have deleted
-    # `_flash_animation` by the time we look - so poll for the removal
-    # itself, matching `test_screenshot` in `napari/_tests/test_viewer.py`.
-    qtbot.waitUntil(
-        lambda: not hasattr(viewer.window._qt_viewer, '_flash_animation')
-    )
-    assert viewer.window._qt_viewer.graphicsEffect() is None
-
-    # clear clipboard and grab image from application view
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
-
-    # Capture the whole window through the production API - which is what
-    # this test exists to cover - triggering the flash animation exactly
-    # once.
+    # the whole window, through the public Window API (flashes _qt_window)
     viewer.window.clipboard(flash=True)
-
-    def _whole_window_copied():
-        # Same shared-X11-selection retry as `_copy_canvas_only` above, but
-        # the retry must use flash=False: add_flash_animation() does not stop
-        # a still-running previous animation, so a second flash=True call
-        # could leak a dangling QPropertyAnimation. The flash assertions
-        # below therefore still describe the single flash=True call.
-        if QGuiApplication.clipboard().image().isNull():
-            viewer.window.clipboard(flash=False)
-        return not QGuiApplication.clipboard().image().isNull()
-
-    qtbot.waitUntil(_whole_window_copied, timeout=2000)
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert not clipboard_image.isNull()
-
-    # ensure the flash effect is applied
-    assert viewer.window._qt_window.graphicsEffect() is not None
-    assert hasattr(viewer.window._qt_window, '_flash_animation')
-    qtbot.waitUntil(
-        lambda: not hasattr(viewer.window._qt_window, '_flash_animation')
-    )
-    assert viewer.window._qt_window.graphicsEffect() is None
+    assert_flashing(viewer.window._qt_window)
+    wait_flash_finished(viewer.window._qt_window)
 
 
 @skip_on_win_ci
