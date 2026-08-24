@@ -302,22 +302,14 @@ def _auto_shutdown_dask_threadworkers():
     modify the number of threads.
     """
     # This fixture's own `finally` below always resets the pool, so a leftover
-    # one here means a previous test leaked it. Reset defensively so that leak
-    # doesn't cascade into failures across the rest of an xdist worker's
-    # tests, but report it so it is still visible.
+    # one here means a previous test leaked it. Reset before failing so that
+    # the leak does not cascade into failures across the rest of an xdist
+    # worker's tests.
     if dask.threaded.default_pool is not None:
         _reset_dask_threadpool()
-        # A warning rather than an assertion, so the reset above stands: the
-        # whole point is that one test's leak must not fail every later test
-        # on this worker. Note `filterwarnings`' `error:::napari` does not
-        # escalate this one - a `stacklevel=2` warning raised from a fixture
-        # body is attributed to `_pytest`, not to napari - so it lands in the
-        # run's warning summary rather than failing the innocent test that
-        # happened to run next.
-        warnings.warn(
+        pytest.fail(
             'dask.threaded.default_pool was not None at test start '
-            '(a previous test likely leaked it); it has been reset.',
-            stacklevel=2,
+            '(a previous test likely leaked it); it has been reset.'
         )
 
     try:
