@@ -131,6 +131,18 @@ def test_animation_thread_redundant_start_preserves_stop(monkeypatch):
     assert worker._waiter.is_set()
 
 
+def test_animation_thread_stops_if_slider_axis_was_removed(qt_dims):
+    qt_dims.dims.ndim = 3
+    worker = AnimationThread()
+    worker.set_slider(qt_dims.slider_widgets[2])
+
+    qt_dims.dims.ndim = 2
+    worker._waiter.clear()
+    worker.advance()
+
+    assert worker._waiter.is_set()
+
+
 @pytest.fixture
 def ref_view(qt_viewer, qtbot):
     """basic viewer with data that we will use a few times
