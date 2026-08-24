@@ -24,6 +24,8 @@ have always had.
 import pytest
 
 from napari.conftest import (  # noqa: F401  (fixtures: imported so pytest finds them)
+    _auto_shutdown_dask_threadworkers,
+    _auto_shutdown_zarr_iothread,
     _dangling_qanimations,
     _dangling_qthread_pool,
     _dangling_qthreads,
