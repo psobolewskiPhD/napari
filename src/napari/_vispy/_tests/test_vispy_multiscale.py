@@ -1,6 +1,13 @@
 import numpy as np
+import pytest
 
 from napari._tests.utils import skip_local_popups, skip_on_win_ci
+
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
 
 
 def test_multiscale(make_napari_viewer):

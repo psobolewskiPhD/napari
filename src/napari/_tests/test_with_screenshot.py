@@ -13,6 +13,12 @@ from napari.utils.interactions import (
     mouse_release_callbacks,
 )
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 @skip_on_win_ci
 @skip_local_popups
