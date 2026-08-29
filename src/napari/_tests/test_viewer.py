@@ -18,6 +18,12 @@ from napari.settings import get_settings
 from napari.utils._tests.test_naming import eval_with_filename
 from napari.utils.action_manager import action_manager
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 def _get_provider_actions(type_):
     actions = set()

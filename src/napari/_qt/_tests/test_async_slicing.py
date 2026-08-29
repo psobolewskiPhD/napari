@@ -20,6 +20,12 @@ from napari._vispy.layers.vectors import (
 from napari.layers import Image, Layer, Points, Vectors
 from napari.utils.events import Event
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 @pytest.fixture
 def rng() -> np.random.Generator:

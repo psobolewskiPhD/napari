@@ -592,6 +592,7 @@ markers = [
     "slow: mark a test as slow",
     "key_bindings: Test of keybindings",
     "show_qt_viewer: Show the QtViewer in this Test",
+    "settle_canvas: Wait for the window manager to stop resizing the canvas before make_napari_viewer(show=True) returns. For tests that read canvas pixels; see _wait_for_canvas_settled.",
 ]
 
 [tool.mypy]

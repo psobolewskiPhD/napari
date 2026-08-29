@@ -3,6 +3,12 @@ import sys
 import numpy as np
 import pytest
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 def test_camera(make_napari_viewer):
     """Test vispy camera creation in 2D."""
