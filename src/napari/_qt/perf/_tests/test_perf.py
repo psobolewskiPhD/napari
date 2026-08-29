@@ -79,13 +79,40 @@ def test_trace_on_start(tmp_path: Path, perf_config, perfmon_script):
     # import error, a Qt plugin failure) the traceback it printed is the only
     # useful evidence, and letting subprocess swallow it is what turns this
     # into an undiagnosable flake worth skipping. Capture and report it.
-    result = subprocess.run(
-        [sys.executable, *perfmon_script],
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    #
+    # `timeout` is not optional here. `capture_output=True` means `run()` reads
+    # the child's pipes until EOF, so a child that never exits - or a grandchild
+    # that inherits the pipes and outlives it - blocks this thread forever. This
+    # is a whole napari process with a GUI, on runners where a hung window
+    # system is a real possibility. The value sits well below
+    # `faulthandler_timeout` (600s) so that a stuck child fails *here*, with the
+    # partial output below, rather than as an unexplained worker kill. Observed
+    # cost of a healthy run: ~23s on macos-15.
+    try:
+        result = subprocess.run(
+            [sys.executable, *perfmon_script],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        # TimeoutExpired carries whatever was read before the timeout; it is
+        # bytes even with text=True, so decode defensively.
+        def _text(stream: bytes | str | None) -> str:
+            if stream is None:
+                return ''
+            if isinstance(stream, bytes):
+                return stream.decode(errors='replace')
+            return stream
+
+        pytest.fail(
+            f'perfmon script did not exit within {e.timeout}s\n'
+            f'--- stdout so far ---\n{_text(e.stdout)}\n'
+            f'--- stderr so far ---\n{_text(e.stderr)}'
+        )
+
     assert result.returncode == 0, (
         f'perfmon script exited with {result.returncode}\n'
         f'--- stdout ---\n{result.stdout}\n'
