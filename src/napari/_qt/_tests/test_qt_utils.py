@@ -102,9 +102,11 @@ def test_add_flash_animation(qtbot):
     add_flash_animation(widget)
     assert widget.graphicsEffect() is not None
     assert hasattr(widget, '_flash_animation')
-    qtbot.wait(350)
+    # 350ms left only 50ms of slack over the 300ms default duration, and the
+    # animation's `finished` -> `remove_flash_animation` hop is a queued
+    # connection on top of that. Poll for the removal instead.
+    qtbot.waitUntil(lambda: not hasattr(widget, '_flash_animation'))
     assert widget.graphicsEffect() is None
-    assert not hasattr(widget, '_flash_animation')
 
 
 @pytest.mark.usefixtures('qapp')

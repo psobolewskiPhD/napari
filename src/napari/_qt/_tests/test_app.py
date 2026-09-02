@@ -41,6 +41,24 @@ def test_windows_grouping_overwrite(qapp):
 
 def test_run_outside_ipython(make_napari_viewer, qapp, monkeypatch):
     """Test that we don't incorrectly give ipython the event loop."""
+    # `IPython.get_ipython()` is a process-global singleton shell, and an
+    # earlier test in this worker process (e.g. one using the embedded Qt
+    # console) can leave one behind. Simulate the plain, non-IPython
+    # environment this test is about.
+    monkeypatch.setitem(sys.modules, 'IPython', None)
+
+    # These three are *preconditions*, not assertions about napari, and they
+    # cannot be made otherwise - which is worth stating, because "this
+    # assertion can never fail, so make it falsifiable" is the attractive
+    # wrong move here. `_ipython_has_eventloop()` is True exactly when a
+    # shell exists whose `active_eventloop` is 'qt', and `get_qapp()`
+    # deliberately *sets* that via `_try_enable_ipython_gui` whenever a shell
+    # exists. So in any environment where these could fail, napari makes them
+    # fail by design; leaving the shell in place and only clearing
+    # `active_eventloop` makes the second one fail as soon as a viewer is
+    # created. What this test actually asserts about napari is the
+    # `exec_` call below, and the True branch of that decision is covered by
+    # `test_run_does_not_steal_the_loop_from_ipython`.
     assert not _ipython_has_eventloop()
     v1 = make_napari_viewer()
     assert not _ipython_has_eventloop()
@@ -55,6 +73,33 @@ def test_run_outside_ipython(make_napari_viewer, qapp, monkeypatch):
 
     v1.close()
     v2.close()
+
+
+def test_run_does_not_steal_the_loop_from_ipython(qapp, monkeypatch):
+    """`run()` must return without starting a loop when `%gui qt` is active.
+
+    The complement of `test_run_outside_ipython`, and the only place
+    `_ipython_has_eventloop()` returning True changes what napari does - so
+    the only place that branch can be tested. A stub shell rather than a real
+    one: `InteractiveShell.enable_gui` raises `NotImplementedError` on the
+    base class, and nothing here needs a working IPython.
+    """
+
+    class _Shell:
+        active_eventloop = 'qt'
+
+    class _IPython:
+        @staticmethod
+        def get_ipython():
+            return _Shell()
+
+    monkeypatch.setitem(sys.modules, 'IPython', _IPython)
+    assert _ipython_has_eventloop()
+
+    mock_exec = Mock()
+    monkeypatch.setattr(qapp, 'exec_', mock_exec)
+    run()
+    mock_exec.assert_not_called()
 
 
 def test_wayland_warning_on_preexisting_app(qapp, monkeypatch):

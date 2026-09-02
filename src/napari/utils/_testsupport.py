@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 import sys
+import traceback
 import warnings
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,6 +22,104 @@ _SAVE_GRAPH_OPNAME = '--save-leaked-object-graph'
 
 def _empty(*_, **__):
     """Empty function for mocking"""
+
+
+#: How long the canvas must go without a resize before it counts as settled,
+#: and how long to keep waiting for that before giving up. See
+#: `_wait_for_canvas_settled`.
+#:
+#: The quiet period has to outlast the gap between the window being mapped and
+#: the window manager's resize arriving - measured at ~130ms locally, so 150ms
+#: has little margin, and raising it costs every shown viewer.
+#:
+#: The timeout only bites when resizes keep arriving and keep extending the
+#: quiet period. Measured locally over one screenshot-heavy file, settling takes
+#: ~218ms almost every time, with one outlier at 644ms - so the cap needs to sit
+#: above that to avoid cutting short a settle that was legitimately still
+#: running, while staying low enough to bound the damage when the canvas simply
+#: will not stop moving. There are ~53 `make_napari_viewer(show=True)` call
+#: sites, so a pathological run pays this cap that many times.
+_CANVAS_QUIET_MS = 150
+_CANVAS_SETTLE_TIMEOUT_MS = 1000
+
+
+def _wait_for_canvas_settled(qtbot, viewer) -> None:
+    """Wait until the window system has stopped resizing the canvas.
+
+    `qtbot.wait_exposed` returns as soon as the window is mapped, but the
+    window manager can finalize the geometry noticeably later: measured at
+    ~130ms after exposure on an idle macOS machine, and both later and larger
+    under the CPU and window-manager contention of parallel test workers on one
+    display. Anything sampling the canvas inside that window - a screenshot, a
+    pixel comparison, a size assertion - can catch the old size, or a frame
+    part-way through being re-rendered at the new one.
+
+    There is no napari-side signal to wait on. The resize arrives from Qt's
+    `resizeGL`, driven by the window system, so the only criterion available is
+    that no resize has arrived for a while. The quiet period does extend each
+    time another resize lands, so a window manager that keeps moving the canvas
+    keeps this waiting.
+
+    This is best-effort, and deliberately so - it reduces how often a resize
+    lands in the middle of a test, it does not prevent it:
+
+    - if the *first* resize has not arrived when the quiet period elapses,
+      there is nothing to extend and this returns early. Locally that resize
+      comes at ~130ms against a 150ms quiet period, which is a narrow margin,
+      and a loaded CI machine can easily exceed it.
+    - nothing stops the window manager resizing later in the test anyway.
+
+    So a test whose assertions depend on canvas geometry should also have an
+    invariant it can actually check - capture the screenshots and retry while
+    their shapes disagree, as `test_camera_orientation_3d` and `test_screenshot`
+    do. The exception, and the reason this helper still exists, is a test whose
+    assertion *is* that two captures agree: `test_visibility_consistency`
+    compares a pair to catch a contrast regression (napari/napari#1622), so
+    retrying until they agree would make it vacuous. That kind of test has to
+    stabilise the canvas up front instead.
+
+    Opt in per test or per module with `@pytest.mark.settle_canvas`; it is not
+    applied to every shown viewer. It was, briefly, and the cost is not only the
+    ~150ms: this runs a nested Qt event loop, which widens the window
+    `qtbot.wait_exposed` already opens, and a macos-15/pyqt5 job segfaulted
+    inside it during `test_add_all_layers` - a test that shows a viewer and
+    never samples a pixel. Restricting it to the tests that read canvas
+    content keeps the protection where it is load-bearing and takes ~40
+    `show=True` call sites out of the blast radius.
+
+    Failing to settle is not an error: a caller that is merely slow to lay out
+    is still better served by continuing than by failing here. The same goes
+    for not finding a canvas at all - this fixture is public API for plugin
+    test suites, which may pass their own `ViewerClass`, and none of them
+    should break over a settling optimisation.
+    """
+    from time import monotonic
+
+    # Only a timeout is expected and ignorable below (see above); anything
+    # else - a deleted canvas, a bug in the predicate - is a real problem and
+    # must not be swallowed by this optimisation.
+    from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
+
+    try:
+        scene_canvas = viewer.window._qt_viewer.canvas._scene_canvas
+    except AttributeError:  # pragma: no cover - custom ViewerClass
+        return
+
+    last_resize = monotonic()
+
+    def _on_resize(event=None):
+        nonlocal last_resize
+        last_resize = monotonic()
+
+    scene_canvas.events.resize.connect(_on_resize)
+    try:
+        with suppress(QtBotTimeoutError):
+            qtbot.waitUntil(
+                lambda: (monotonic() - last_resize) * 1000 >= _CANVAS_QUIET_MS,
+                timeout=_CANVAS_SETTLE_TIMEOUT_MS,
+            )
+    finally:
+        scene_canvas.events.resize.disconnect(_on_resize)
 
 
 def pytest_addoption(parser):
@@ -61,8 +160,14 @@ def fail_obj_graph(Klass):  # pragma: no cover
         leaked_objects_count = len(Klass._instances)
 
         gc.collect()
+        # COUNTER is per *process*, so under pytest-xdist two workers leaking
+        # the same class would both write `<Klass>-leak-backref-graph-1.pdf`
+        # into the same directory and clobber each other - leaving a CI
+        # artifact that is the wrong worker's graph, or half of two. Namespace
+        # it by worker; `PYTEST_XDIST_WORKER` is unset when not distributing.
+        worker = os.environ.get('PYTEST_XDIST_WORKER', 'main')
         file_path = Path(
-            f'{Klass.__name__}-leak-backref-graph-{COUNTER}.pdf'
+            f'{Klass.__name__}-leak-backref-graph-{worker}-{COUNTER}.pdf'
         ).absolute()
         objgraph.show_backrefs(
             list(Klass._instances),
@@ -355,6 +460,10 @@ def make_napari_viewer(
 
         if model_kwargs.get('show', False):
             qtbot.wait_exposed(viewer.window._qt_window, timeout=5000)
+            # Opt-in only - see `_wait_for_canvas_settled` for why this is not
+            # done for every shown viewer.
+            if 'settle_canvas' in request.keywords:
+                _wait_for_canvas_settled(qtbot, viewer)
 
         return viewer
 
@@ -495,6 +604,22 @@ class LeakSafeLogRecord(logging.LogRecord):
                 str(arg) if not isinstance(arg, int | float) else arg
                 for arg in self.args
             )
+        if self.exc_info is not None:
+            # `logger.exception(...)` stores the live exception here, and its
+            # traceback keeps every frame alive - including the `self` of
+            # whichever method logged. pytest's logging plugin holds records
+            # for the duration of a test, so a Qt object that logs an
+            # exception looks leaked to the `QtViewer._instances` and
+            # dangling-widget checks. Same retention mechanism as the one
+            # `_find_dangling_widgets` had to be restructured for.
+            #
+            # Render it now and drop the frames: handlers prefer `exc_text`
+            # when it is set, so the traceback still reaches the output.
+            if self.exc_text is None:
+                self.exc_text = ''.join(
+                    traceback.format_exception(*self.exc_info)
+                ).rstrip('\n')
+            self.exc_info = None
 
 
 @pytest.fixture(autouse=True, scope='session')

@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 from app_model.types import MenuItem, SubmenuItem
 from npe2.manifest.contributions import SampleDataURI
-from qtpy.QtGui import QGuiApplication
+from qtpy.QtCore import QMimeData
+from qtpy.QtGui import QGuiApplication, QImage
 from qtpy.QtWidgets import QApplication
 
 from napari._app_model import get_app_model
@@ -193,14 +194,34 @@ def test_show_shortcuts_actions(make_napari_viewer):
     viewer.window._pref_dialog.close()
 
 
-def test_image_from_clipboard(make_napari_viewer):
+def test_image_from_clipboard(make_napari_viewer, monkeypatch):
     make_napari_viewer()
     app = get_app_model()
 
-    # Ensure clipboard is empty
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
+    # The clipboard is a single resource shared by every process on the
+    # display, so `clear()` here does not mean it stays empty: under
+    # pytest-xdist another worker can take ownership of it at any moment, and
+    # `test_qaction_layer.py` does exactly that, putting JSON text on it. That
+    # makes `mime.hasText()` true, and `_image_from_clipboard` then emits an
+    # extra 'trying to parse text in clipboard as a link' message before the
+    # one asserted below - seen on CI as "Expected 'show_info' to be called
+    # once. Called 2 times."
+    #
+    # This test is about what the command does when the clipboard holds
+    # nothing useful, so supply exactly that instead of asking the display for
+    # it. A plain class rather than a Mock: patching a method of a QObject
+    # subclass with a Mock upsets PySide6's metaobject introspection.
+    class _EmptyClipboard:
+        def mimeData(self):
+            return QMimeData()
+
+        def image(self):
+            return QImage()
+
+    monkeypatch.setattr(
+        QGuiApplication, 'clipboard', lambda *_: _EmptyClipboard()
+    )
+    assert QGuiApplication.clipboard().image().isNull()
 
     # Check action command execution
     with mock.patch('napari._qt.qt_viewer.show_info') as mock_show_info:
@@ -435,7 +456,9 @@ def test_screenshot(
         'napari.window.file.copy_viewer_screenshot',
     ],
 )
-def test_screenshot_to_clipboard(make_napari_viewer, qtbot, action_id):
+def test_screenshot_to_clipboard(
+    make_napari_viewer, qtbot, monkeypatch, action_id
+):
     """Test screenshot to clipboard actions can be triggered."""
     viewer = make_napari_viewer()
     app = get_app_model()
@@ -446,15 +469,42 @@ def test_screenshot_to_clipboard(make_napari_viewer, qtbot, action_id):
     assert len(viewer.layers) == 1
     viewer.window._update_file_menu_state()
 
-    # Check action command execution
+    # Record the flash without retaining the widget it was called with.
+    # A `mock.patch` here captures the `_QtMainWindow` in `call_args`, and if
+    # this test fails for any reason pytest keeps the failure's traceback -
+    # and so the frame, the mock, and that widget - alive for the rest of the
+    # session. The window then shows up as a leaked top-level widget at the
+    # *next* test's teardown, turning one failure into a second error against
+    # an innocent test. Seen exactly that way on CI: `test_restart` reported
+    # `Found dangling widgets: _QtMainWindow` with a plain `(window,)` tuple
+    # as its only referrer. Same retention mechanism as `f46d54058`.
+    flashed = []
+    monkeypatch.setattr(
+        'napari._qt.utils.add_flash_animation',
+        lambda widget: flashed.append(type(widget).__name__),
+    )
+
     # ---- Ensure clipboard is empty
     QGuiApplication.clipboard().clear()
     clipboard_image = QGuiApplication.clipboard().image()
     assert clipboard_image.isNull()
-    # ---- Execute action
-    with mock.patch('napari._qt.utils.add_flash_animation') as mock_flash:
-        app.commands.execute_command(action_id)
-    mock_flash.assert_called_once()
+
+    # ---- Execute action, retrying the copy rather than the whole command.
+    # Taking ownership of the X11 clipboard selection is a shared, per-display
+    # operation that can fail outright under concurrent xdist workers - Qt logs
+    # `QXcbClipboard::setMimeData: Cannot set X11 selection owner` and does not
+    # retry - so the image never arrives and no amount of waiting helps. Retry
+    # the write itself. The command is re-executed, so assert on the flash
+    # after the loop rather than once per attempt.
+    def _clipboard_has_image() -> bool:
+        if QGuiApplication.clipboard().image().isNull():
+            app.commands.execute_command(action_id)
+        return not QGuiApplication.clipboard().image().isNull()
+
+    qtbot.waitUntil(_clipboard_has_image, timeout=5000)
+
+    assert flashed, 'the screenshot command did not flash the viewer'
+    assert set(flashed) == {'_QtMainWindow'}, flashed
     # ---- Ensure clipboard has image
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()

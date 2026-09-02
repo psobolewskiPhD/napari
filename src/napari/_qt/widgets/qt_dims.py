@@ -1,3 +1,4 @@
+import logging
 import warnings
 
 import numpy as np
@@ -10,6 +11,13 @@ from napari._qt.widgets.qt_dims_slider import (
 )
 from napari.components.dims import Dims
 from napari.settings._constants import LoopMode
+
+#: How long `QtDims.stop()` waits for the animation thread to finish. Bounded
+#: because `stop()` is also called from ordinary UI-update paths, where an
+#: unbounded wait would stall the GUI.
+_ANIMATION_STOP_TIMEOUT_MS = 2000
+
+logger = logging.getLogger(__name__)
 
 
 class QtDims(QWidget):
@@ -323,10 +331,42 @@ class QtDims(QWidget):
             warnings.warn('Refusing to play a hidden axis')
 
     @Slot()
-    def stop(self) -> None:
-        """Stop axis animation and wait for its thread to finish."""
+    def stop(self) -> bool:
+        """Stop axis animation and wait (bounded) for its thread to finish.
+
+        `stop()` is called from frequent UI-update paths (`_update_display`,
+        `_update_nsliders`), not just teardown, so an unbounded `wait()`
+        here would turn any contention-driven delay in the animation thread
+        into an indefinite stall across all of those call sites.
+
+        Returns
+        -------
+        bool
+            Whether the animation thread actually finished. Callers that are
+            about to let the thread be destroyed must check this: Qt aborts
+            when a running QThread is destroyed.
+        """
         self._animation_thread._stop()
+        return self._animation_thread.wait(_ANIMATION_STOP_TIMEOUT_MS)
+
+    def _stop_before_destroy(self) -> None:
+        """Stop and fully join the animation thread before destroying it.
+
+        Unlike :meth:`stop`, this method may wait without a timeout. It is only
+        for teardown paths, where returning with a running child ``QThread``
+        would let Qt destroy that thread and fatally abort the process.
+        """
+        if not self._animation_thread.isRunning() or self.stop():
+            return
+
+        # Restore the pre-bounded-wait safety invariant before reporting the
+        # delay: diagnostics must never precede the safety-critical join.
         self._animation_thread.wait()
+        logger.warning(
+            'Axis animation thread did not stop within %dms of being asked '
+            'to; teardown waited until it finished before closing.',
+            _ANIMATION_STOP_TIMEOUT_MS,
+        )
 
     @property
     def is_playing(self):
@@ -358,6 +398,11 @@ class QtDims(QWidget):
             self.dims.set_current_step(axis, frame)
 
     def closeEvent(self, event):
+        # Qt fatally aborts if a QThread is destroyed while still running,
+        # and `_animation_thread` is a child of this widget, so a still-
+        # playing animation must be stopped (and joined) before `deleteLater`
+        # can be allowed to destroy it.
+        self._stop_before_destroy()
         [w.deleteLater() for w in self.slider_widgets]
         self.deleteLater()
         event.accept()

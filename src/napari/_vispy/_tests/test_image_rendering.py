@@ -7,6 +7,12 @@ from napari._vispy.utils.qt_font import FontInfo
 from napari.components.dims import Dims
 from napari.layers.image import Image
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 def test_image_rendering(make_napari_viewer):
     """Test 3D image with different rendering."""

@@ -3,6 +3,7 @@ from weakref import ref
 
 import numpy as np
 import pytest
+from qtpy.QtCore import QThread
 
 from napari._qt.widgets.qt_dims_slider import AnimationThread
 from napari.settings._constants import LoopMode
@@ -50,7 +51,34 @@ def make_worker(
     worker.frame_requested.connect(bump)
     worker.go = go
 
-    yield worker
+    try:
+        yield worker
+    finally:
+        _stop_and_join(worker)
+
+
+def _stop_and_join(worker, timeout: int = 5000) -> None:
+    """Stop `worker` and wait for it, so no test can leave the thread running.
+
+    Priority is restored first. A test may have started the worker
+    deprioritised - `test_animation_thread_start_accepts_priority` does, since
+    that is its whole subject - and a low-priority thread can miss a bounded
+    join on a contended runner. Coverage jobs make that materially worse:
+    `conftest`'s `run_with_trace` puts `sys.settrace` inside `QThread.run` so
+    coverage can see thread code at all (coveragepy#686), which line-traces
+    this worker's loop. Guarded on `isRunning`, because Qt otherwise warns
+    "Cannot set priority, thread is not running".
+
+    Deliberately does not assert on the join. `_dangling_qthreads` already
+    judges whether a thread leaked and reports it with a creation site; an
+    assertion here would be a second, less informative report of the same
+    fact - and a contention-sensitive one, since a stop request only takes
+    effect once the thread is next scheduled.
+    """
+    if worker.isRunning():
+        worker.setPriority(QThread.Priority.NormalPriority)
+    worker._stop()
+    worker.wait(timeout)
 
 
 # Each tuple represents different arguments we will pass to make_thread
@@ -109,6 +137,36 @@ def test_animation_thread_once(qt_dims, qtbot):
     ):
         worker.start()
     assert worker.current == worker.nz
+
+
+def test_animation_thread_start_accepts_priority(qt_dims, qtbot):
+    """`AnimationThread.start()` must pass a priority through to `QThread`."""
+    with make_worker(qt_dims, qtbot, nframes=1000) as worker:
+        worker.start(QThread.Priority.LowPriority)
+        qtbot.waitUntil(worker.isRunning)
+        assert worker.priority() == QThread.Priority.LowPriority
+
+
+def test_animation_thread_redundant_start_preserves_stop(monkeypatch):
+    worker = AnimationThread()
+    worker._stop()
+    monkeypatch.setattr(worker, 'isRunning', lambda: True)
+
+    worker.start()
+
+    assert worker._waiter.is_set()
+
+
+def test_animation_thread_stops_if_slider_axis_was_removed(qt_dims):
+    qt_dims.dims.ndim = 3
+    worker = AnimationThread()
+    worker.set_slider(qt_dims.slider_widgets[2])
+
+    qt_dims.dims.ndim = 2
+    worker._waiter.clear()
+    worker.advance()
+
+    assert worker._waiter.is_set()
 
 
 @pytest.fixture

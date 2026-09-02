@@ -14,17 +14,33 @@ from qtpy.QtGui import QEnterEvent, QGuiApplication, QKeyEvent
 from qtpy.QtWidgets import QApplication
 
 from napari._qt._tests.test_qt_viewer import qt_viewer
-from napari._tests.utils import skip_local_popups, skip_on_win_ci
+from napari._tests.utils import (
+    skip_local_popups,
+    skip_on_win_ci,
+)
 from napari.settings import get_settings
 from napari.utils.action_manager import action_manager
 from napari.utils.theme import available_themes
+
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
 
 
 @pytest.mark.usefixtures('builtins')
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
 @patch('qtpy.QtWidgets.QApplication.topLevelWidgets')
-def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file(
+    mock_keyboard_modifiers, qapp_mock, make_napari_viewer, tmp_path
+):
     """Test dropping a python file on to the viewer."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'image_to_drop.py'
@@ -46,6 +62,7 @@ def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
@@ -63,7 +80,14 @@ def test_drop_python_file(qapp_mock, make_napari_viewer, tmp_path):
 @pytest.mark.usefixtures('builtins')
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
-def test_drop_python_file_3d(make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file_3d(
+    mock_keyboard_modifiers, make_napari_viewer, tmp_path
+):
     """Test that dropping a python file using a 3D image on the viewer works."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'image_to_drop_3d.py'
@@ -83,6 +107,7 @@ def test_drop_python_file_3d(make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
@@ -97,7 +122,14 @@ def test_drop_python_file_3d(make_napari_viewer, tmp_path):
 @pytest.mark.usefixtures('builtins')
 @pytest.mark.enable_console
 @pytest.mark.filterwarnings('ignore::DeprecationWarning:jupyter_client')
-def test_drop_python_file_double_viewer(make_napari_viewer, tmp_path):
+@patch.object(
+    QGuiApplication,
+    'keyboardModifiers',
+    return_value=Qt.KeyboardModifier.NoModifier,
+)
+def test_drop_python_file_double_viewer(
+    mock_keyboard_modifiers, make_napari_viewer, tmp_path
+):
     """Test that dropping a python file on the viewer works."""
     viewer = make_napari_viewer()
     filename = tmp_path / 'test.py'
@@ -119,6 +151,7 @@ def test_drop_python_file_double_viewer(make_napari_viewer, tmp_path):
         QUrl(filename.as_uri())
     ]
     viewer.window._qt_viewer.dropEvent(mock_event)
+    mock_keyboard_modifiers.assert_called()
 
     # Check that the file was executed
     assert viewer.layers[0].name == 'Dropped Image'
@@ -327,19 +360,33 @@ def test_qt_viewer_toggle_console(make_napari_viewer):
 @skip_local_popups
 @pytest.mark.skipif(os.environ.get('MIN_REQ', '0') == '1', reason='min req')
 def test_qt_viewer_console_focus(qtbot, make_napari_viewer):
-    """Test console has focus when instantiating from viewer."""
+    """Test console is given focus when instantiated from the viewer.
+
+    Checks the window's focus widget rather than ``console.hasFocus()``.
+    ``hasFocus()`` is ``QApplication.focusWidget() is self``, which is only
+    true while the window is *active* - and on a shared display exactly one
+    window can be active, so any sibling process showing a window (every
+    xdist run) can take activation away and make it False forever. What
+    napari actually controls is which widget the window would focus once
+    activated, and ``QWidget.focusWidget()`` on the top level reports
+    precisely that, independent of activation.
+    """
     viewer = make_napari_viewer(show=True)
     view = viewer.window._qt_viewer
-    assert not view.console.hasFocus(), 'console has focus before being shown'
+    window = view.window()
+    assert window.focusWidget() is not view.console, (
+        'console has focus before being shown'
+    )
 
     view.toggle_console_visibility(None)
 
-    def console_has_focus():
-        assert view.console.hasFocus(), (
-            'console does not have focus when shown'
+    def console_is_window_focus_widget():
+        assert window.focusWidget() is view.console, (
+            'console was not given focus when shown; window focus widget '
+            f'is {window.focusWidget()!r}'
         )
 
-    qtbot.waitUntil(console_has_focus)
+    qtbot.waitUntil(console_is_window_focus_widget)
 
 
 @skip_on_win_ci
@@ -375,13 +422,26 @@ def test_screenshot(make_napari_viewer, qapp, qtbot):
     qtbot.wait(5)
     qapp.processEvents()
 
-    screenshot2 = viewer.window.screenshot(flash=False, canvas_only=True)
+    result = {}
 
-    qapp.processEvents()
+    def _capture_pair_agrees() -> bool:
+        result['screenshot2'] = viewer.window.screenshot(
+            flash=False, canvas_only=True
+        )
+        with pytest.warns(FutureWarning, match='qt_viewer'):
+            result['screenshot1'] = viewer.window.qt_viewer.screenshot(
+                flash=False
+            )
+        return result['screenshot1'].shape == result['screenshot2'].shape
 
-    # Take screenshot
-    with pytest.warns(FutureWarning, match='qt_viewer'):
-        screenshot1 = viewer.window.qt_viewer.screenshot(flash=False)
+    # A fixed settle time before the first capture isn't enough: under
+    # xdist's window-manager contention on a shared display, a resize can
+    # still land in the gap between the two screenshots (canvas_only vs.
+    # whole-qt_viewer), producing shape-mismatched arrays. Retry the pair
+    # instead of guessing a longer fixed wait.
+    qtbot.waitUntil(_capture_pair_agrees, timeout=3000)
+    screenshot1 = result['screenshot1']
+    screenshot2 = result['screenshot2']
 
     npt.assert_array_equal(screenshot1, screenshot2)
     assert screenshot1.ndim == 3
@@ -390,46 +450,58 @@ def test_screenshot(make_napari_viewer, qapp, qtbot):
 @pytest.mark.slow
 @skip_on_win_ci
 def test_qt_viewer_clipboard_with_flash(make_napari_viewer, qtbot):
+    """`flash=True` must flash the widget whose contents were captured.
+
+    Deliberately asserts nothing about what lands on the clipboard. That round
+    trip - both `canvas_only` variants, with the retry it needs because X11
+    selection ownership is shared across every process on the display - is
+    covered by `test_qt_viewer_clipboard_without_flash` below.
+
+    Keeping it out of here is what makes this test safe rather than merely
+    ordered. A flash lives for `add_flash_animation`'s 300ms, and any retry
+    loop between the call and the assertion pumps the Qt event loop, so it can
+    outlive the flash: measured locally at ~5ms per `canvas_only` copy plus
+    pytest-qt's 10ms poll interval, about 20 retries. It then fails as
+    `assert None is not None`, which reads as a broken flash rather than as a
+    slow clipboard - and sends the reader into `add_flash_animation`, which is
+    fine. The flash is independent of the clipboard write anyway:
+    `Window.clipboard` flashes inside `_screenshot`, before `setImage`.
+    """
     viewer = make_napari_viewer()
-    # make sure clipboard is empty
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
 
+    def assert_flashing(widget) -> None:
+        # `add_flash_animation` sets both of these synchronously, so this is
+        # asserted immediately after the call on purpose - deferring it is the
+        # race described in the docstring. It looks trivial and is not: it is
+        # the only check that `clipboard(flash=True)` wires `flash` through.
+        assert widget.graphicsEffect() is not None, (
+            f'clipboard(flash=True) did not flash {type(widget).__name__}'
+        )
+        assert hasattr(widget, '_flash_animation')
+
+    def wait_flash_finished(widget) -> None:
+        # Not merely coverage: `_dangling_qanimations` reports a still-running
+        # QPropertyAnimation at teardown as a leak, and under `--dist loadfile`
+        # that report lands on whichever test in this file runs next. Polling
+        # for the removal rather than waiting on the animation's `finished`
+        # signal, because `remove_flash_animation` may already have deleted the
+        # animation by the time we could connect to it.
+        qtbot.waitUntil(lambda: not hasattr(widget, '_flash_animation'))
+        assert widget.graphicsEffect() is None
+
+    # the canvas, through QtViewer (flashes the QtViewer itself)
     viewer.window._qt_viewer.clipboard(flash=True)
+    assert_flashing(viewer.window._qt_viewer)
+    wait_flash_finished(viewer.window._qt_viewer)
 
-    viewer.window.clipboard(flash=False, canvas_only=True)
-
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert not clipboard_image.isNull()
-
-    # ensure the flash effect is applied
-    assert viewer.window._qt_viewer.graphicsEffect() is not None
-    assert hasattr(viewer.window._qt_viewer, '_flash_animation')
-    qtbot.wait(500)  # wait for the animation to finish
-    assert viewer.window._qt_viewer.graphicsEffect() is None
-    assert not hasattr(viewer.window._qt_viewer, '_flash_animation')
-
-    # clear clipboard and grab image from application view
-    QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
-
-    # capture screenshot of the entire window
+    # the whole window, through the public Window API (flashes _qt_window)
     viewer.window.clipboard(flash=True)
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert not clipboard_image.isNull()
-
-    # ensure the flash effect is applied
-    assert viewer.window._qt_window.graphicsEffect() is not None
-    assert hasattr(viewer.window._qt_window, '_flash_animation')
-    qtbot.wait(500)  # wait for the animation to finish
-    assert viewer.window._qt_window.graphicsEffect() is None
-    assert not hasattr(viewer.window._qt_window, '_flash_animation')
+    assert_flashing(viewer.window._qt_window)
+    wait_flash_finished(viewer.window._qt_window)
 
 
 @skip_on_win_ci
-def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
+def test_qt_viewer_clipboard_without_flash(make_napari_viewer, qtbot):
     viewer = make_napari_viewer()
     # make sure clipboard is empty
     QGuiApplication.clipboard().clear()
@@ -439,8 +511,17 @@ def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
     # capture screenshot
     viewer.window._qt_viewer.clipboard(flash=False)
 
-    viewer.window.clipboard(flash=False, canvas_only=True)
+    def _copy_canvas_only():
+        # Setting the X11 clipboard selection owner is a shared,
+        # process-wide resource; under xdist's concurrent worker processes
+        # on one Xvfb display it can fail outright ("Cannot set X11
+        # selection owner") with no internal retry from Qt, so retry the
+        # copy itself instead of just waiting for an image that will
+        # never arrive on its own.
+        viewer.window.clipboard(flash=False, canvas_only=True)
+        return not QGuiApplication.clipboard().image().isNull()
 
+    qtbot.waitUntil(_copy_canvas_only, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 
@@ -454,7 +535,11 @@ def test_qt_viewer_clipboard_without_flash(make_napari_viewer):
     assert clipboard_image.isNull()
 
     # capture screenshot of the entire window
-    viewer.window.clipboard(flash=False)
+    def _copy_whole_window():
+        viewer.window.clipboard(flash=False)
+        return not QGuiApplication.clipboard().image().isNull()
+
+    qtbot.waitUntil(_copy_whole_window, timeout=2000)
     clipboard_image = QGuiApplication.clipboard().image()
     assert not clipboard_image.isNull()
 

@@ -1,10 +1,8 @@
-from unittest.mock import MagicMock
-
 import numpy as np
 import pandas as pd
 import pytest
 from pandas.core.generic import pandas_dtype
-from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt
+from qtpy.QtCore import QItemSelection, QItemSelectionModel, QMimeData, Qt
 from qtpy.QtGui import QGuiApplication
 from qtpy.QtWidgets import (
     QAbstractItemDelegate,
@@ -20,6 +18,16 @@ from qtpy.QtWidgets import (
 from napari import layers
 from napari.components import ViewerModel
 from napari_builtins._qt.features_table import FeaturesTable, PandasModel
+
+# Several tests below call `w.toggle.click()`, which starts a QToggleSwitch
+# handle animation in superqt. Nothing here asserts on that animation, and if
+# teardown beats it the dangling-animation check fires *and* the still-running
+# animation keeps the parentless FeaturesTable alive, so the dangling-widget
+# check fires too - one cause, two errors, seen on the contended min_req job.
+# Those tests carry `@pytest.mark.disable_qanimation_start`, which makes
+# `QPropertyAnimation.start` a no-op: deterministic, rather than a longer wait.
+# `click()` still flips `isChecked()` and still emits `toggled`, which is all
+# these tests rely on.
 
 
 @pytest.mark.usefixtures('qapp')
@@ -195,6 +203,7 @@ def test_features_table_selection_shapes(qtbot):
     assert layer.selected_data == {1}
 
 
+@pytest.mark.disable_qanimation_start
 def test_features_table_edit(qtbot):
     v = ViewerModel()
     w = FeaturesTable(v)
@@ -231,7 +240,7 @@ def test_features_table_save_csv(qtbot, tmp_path, monkeypatch):
 
     path = tmp_path / 'test.csv'
     monkeypatch.setattr(
-        QFileDialog, 'getSaveFileName', MagicMock(return_value=(path, None))
+        QFileDialog, 'getSaveFileName', lambda *a, **k: (path, None)
     )
 
     w.save.click()
@@ -239,6 +248,60 @@ def test_features_table_save_csv(qtbot, tmp_path, monkeypatch):
     pd.testing.assert_frame_equal(pd.read_csv(path, index_col=0), df)
 
 
+@pytest.fixture
+def _private_clipboard(monkeypatch):
+    """Give this test a clipboard no other process can touch.
+
+    The clipboard is one resource shared by every process on the display, and
+    this test round-trips through it three times: napari writes and the test
+    reads, then the test writes and napari reads. Under pytest-xdist a
+    concurrently running worker can take ownership between any write and its
+    read - and on X11 the write can fail outright
+    (`QXcbClipboard::setMimeData: Cannot set X11 selection owner`) with no
+    retry from Qt.
+
+    A retry cannot fix this test the way it fixed the others. One of its three
+    assertions is that pressing 'c' *without* Ctrl leaves the clipboard
+    untouched, and there is no way to retry the absence of an event; a foreign
+    write in that window is indistinguishable from napari copying when it
+    should not have.
+
+    Nor is it needed: what this test checks is `FeaturesTable`'s key handling
+    and its TSV serialisation, not Qt's clipboard integration. So keep the data
+    in-process, where no other worker can reach it. Patching `QGuiApplication`
+    covers the production code (`features_table.py` uses
+    `QGuiApplication.clipboard()`) and the `qapp.clipboard()` calls below,
+    since `QApplication` inherits the method rather than defining its own.
+    A plain class rather than a Mock: patching a method of a QObject subclass
+    with a Mock upsets PySide6's metaobject introspection.
+    """
+
+    class _LocalClipboard:
+        def __init__(self):
+            self._mime = QMimeData()
+
+        def text(self, *_):
+            return self._mime.text()
+
+        def setText(self, text, *_):
+            self._mime = QMimeData()
+            self._mime.setText(text)
+
+        def mimeData(self, *_):
+            return self._mime
+
+        def setMimeData(self, mime_data, *_):
+            self._mime = mime_data
+
+        def clear(self, *_):
+            self._mime = QMimeData()
+
+    clipboard = _LocalClipboard()
+    monkeypatch.setattr(QGuiApplication, 'clipboard', lambda *_: clipboard)
+
+
+@pytest.mark.disable_qanimation_start
+@pytest.mark.usefixtures('_private_clipboard')
 def test_features_table_copy_paste(qtbot, qapp):
     v = ViewerModel()
     w = FeaturesTable(v)
@@ -285,6 +348,7 @@ def test_features_table_copy_paste(qtbot, qapp):
     np.testing.assert_array_equal(layer.features.iloc[2], [3, 8])
 
 
+@pytest.mark.disable_qanimation_start
 @pytest.mark.parametrize(
     ('dtype', 'val', 'rendered_val', 'editor_class', 'new_val'),
     [
@@ -302,6 +366,12 @@ def test_features_table_copy_paste(qtbot, qapp):
         (pd.CategoricalDtype(['x', 'y']), 'x', 'x', QComboBox, 'y'),
     ],
 )
+# `22-07-2025` is ambiguous to `pd.to_datetime`, which is the point - the
+# test pins how the table renders and edits a `datetime64[ns]` column. Old
+# pandas (through at least 1.5.3) warns about the DD/MM/YYYY guess, and
+# `error:::napari` in `pyproject.toml` turns that into a failure on the
+# min_req job. Modern pandas does not warn, so this only bites the floor.
+@pytest.mark.filterwarnings('ignore:Parsing dates in DD/MM/YYYY format')
 def test_features_tables_dtypes(
     dtype, val, rendered_val, editor_class, new_val, qtbot
 ):
@@ -441,6 +511,7 @@ def _add_all_supported_layers(viewer, include=None):
     return layers_dict
 
 
+@pytest.mark.disable_qanimation_start
 def test_features_table_multilayer_table_concat(qtbot):
     """
     Test concatenation of features from multiple layers in the features table.
@@ -566,6 +637,7 @@ def test_features_table_multilayer_table_selection(qtbot):
     assert shapes_layer.selected_data == {1}
 
 
+@pytest.mark.disable_qanimation_start
 def test_features_table_multilayer_edit(qtbot):
     v = ViewerModel()
     w = FeaturesTable(v)
@@ -617,7 +689,7 @@ def test_features_table_multilayer_save_csv(qtbot, tmp_path, monkeypatch):
 
     path = tmp_path / 'test2.csv'
     monkeypatch.setattr(
-        QFileDialog, 'getSaveFileName', MagicMock(return_value=(path, None))
+        QFileDialog, 'getSaveFileName', lambda *a, **k: (path, None)
     )
 
     w.save.click()

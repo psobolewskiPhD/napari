@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import queue
 import sys
 import traceback
 import warnings
@@ -16,13 +17,19 @@ from typing import (
 from weakref import WeakSet, ref
 
 import numpy as np
-from qtpy.QtCore import QCoreApplication, QObject, Qt, QUrl
+from qtpy.QtCore import (
+    QCoreApplication,
+    QObject,
+    Qt,
+    QUrl,
+    Signal,
+    Slot,
+)
 from qtpy.QtGui import (
     QGuiApplication,
     QImage,
 )
 from qtpy.QtWidgets import QFileDialog, QSplitter, QVBoxLayout, QWidget
-from superqt import ensure_main_thread
 
 from napari._app_model import get_app_model
 from napari._qt.containers import QtLayerList
@@ -153,6 +160,16 @@ class QtViewer(QSplitter):
 
     _instances: ClassVar[WeakSet[QtViewer]] = WeakSet()
 
+    #: Emitted by `_queue_slice_ready` (possibly from the slicing thread) to
+    #: hand `_process_slice_ready_events` over to the main thread. Declared as
+    #: a real signal rather than reached by name through
+    #: `QMetaObject.invokeMethod`: the bindings resolve a signal/slot
+    #: connection once, at connect time, and raise if it cannot be made,
+    #: whereas a by-name invocation returns False and merely warns - which
+    #: would disable async slicing silently, in the one code path that is off
+    #: by default and so only covered by `_tests/test_async_slicing.py`.
+    _slice_ready_queued = Signal()
+
     def __init__(
         self,
         viewer: ViewerModel,
@@ -217,7 +234,32 @@ class QtViewer(QSplitter):
         self.setOrientation(Qt.Orientation.Vertical)
         self.addWidget(main_widget)
 
-        self.viewer._layer_slicer.events.ready.connect(self._on_slice_ready)  # type: ignore[arg-type]
+        # `_layer_slicer.events.ready` may be emitted from its background
+        # slicing thread. Constructing a QObject from that thread (which is
+        # what a direct `@ensure_main_thread`-wrapped callback does under
+        # the hood, via a throwaway QObject it creates to hop threads) has
+        # been observed to deadlock against the main thread doing its own
+        # Qt object construction at the same time. `queue.SimpleQueue` is
+        # plain Python and thread-safe with no Qt/GIL interaction beyond
+        # normal refcounting, so the slicing thread only ever touches that,
+        # and then emits `_slice_ready_queued`. Emitting an existing signal
+        # constructs nothing on the calling thread; the queued connection
+        # made here marshals the call onto the main thread, which is the
+        # sanctioned way to notify across threads in Qt.
+        self._slice_ready_events: queue.SimpleQueue[Event] = (
+            queue.SimpleQueue()
+        )
+        # Left at Qt's default `AutoConnection`, which is what this needs:
+        # cross-thread emissions are queued onto the receiver's thread and
+        # never run on the emitting one, and a same-thread emission is a
+        # direct call - matching what `ensure_main_thread` did before, since
+        # it too ran inline when already on the main thread. Spelling
+        # `QueuedConnection` explicitly is also untypeable: PyQt's stubs
+        # model `connect` as taking the slot alone, so both the positional
+        # and the `type=` form are mypy errors. Verified on PyQt6 6.10.0 and
+        # PySide6 6.10.3 that the default really does queue across threads.
+        self._slice_ready_queued.connect(self._process_slice_ready_events)
+        self.viewer._layer_slicer.events.ready.connect(self._queue_slice_ready)
 
         self._on_active_change()
         self.viewer.layers.events.inserted.connect(self._update_camera_depth)
@@ -333,6 +375,7 @@ class QtViewer(QSplitter):
             layerListLayout.addWidget(self.viewerButtons)
             layerListLayout.setContentsMargins(8, 4, 8, 6)
             layerList.setLayout(layerListLayout)
+            prev_policy = layerList.sizePolicy()
             self._dockLayerList = QtViewerDockWidget(
                 self,
                 layerList,
@@ -342,6 +385,9 @@ class QtViewer(QSplitter):
                 object_name='layer list',
                 close_btn=False,
             )
+            # restore policy to avoid empty space below buttons
+            # See https://github.com/napari/napari/pull/9447
+            layerList.setSizePolicy(prev_policy)
         return self._dockLayerList
 
     @property
@@ -600,9 +646,75 @@ class QtViewer(QSplitter):
             self.dockConsole.setWidget(console)  # type: ignore[no-untyped-call]
             console.setParent(self.dockConsole)
 
-    @ensure_main_thread
+    def _queue_slice_ready(self, event: Event) -> None:
+        """Connected to `viewer._layer_slicer.events.ready`.
+
+        May be called from `_layer_slicer`'s background slicing thread, so
+        this must never construct or otherwise touch a Qt object directly -
+        only plain, thread-safe Python. Emitting `_slice_ready_queued`
+        constructs nothing: the signal and its connection to
+        `_process_slice_ready_events` already exist on the main thread, and
+        emitting one across threads is explicitly supported - Qt queues the
+        call onto the receiver's thread rather than running it here.
+        """
+        self._slice_ready_events.put(event)
+        self._slice_ready_queued.emit()
+
+    @Slot()
+    def _process_slice_ready_events(self) -> None:
+        """Handle `_layer_slicer.events.ready` events queued by
+        `_queue_slice_ready`.
+
+        This is the normal path, reached on the main thread via the
+        `_slice_ready_queued` connection made in `__init__`. Errors propagate,
+        because that is what connecting to the emitter directly would have
+        done: `EventEmitter._invoke_callback` defers to `_handle_exception`,
+        which re-raises unless `ignore_callback_errors` is set, and it
+        defaults to False. Swallowing here instead would turn a real slicing
+        bug into a log line that no test fails on.
+
+        Teardown wants the opposite, and calls
+        `_drain_slice_ready_events(suppress_errors=True)` directly.
+        """
+        self._drain_slice_ready_events(suppress_errors=False)
+
+    def _drain_slice_ready_events(self, *, suppress_errors: bool) -> None:
+        """Apply every queued slice-ready event, oldest first.
+
+        Draining the whole queue in one go is deliberate and safe: the
+        slicer's executor has a single worker, so completion order matches
+        submission order and the newest response is applied last. Superseded
+        slices are usually cancelled in `_LayerSlicer.submit` before they ever
+        complete, and one that slips through is inert -
+        `Layer._update_loaded_slice_id` only acts when the response's id is
+        still the layer's most recent.
+
+        Parameters
+        ----------
+        suppress_errors : bool
+            Log and continue instead of raising. Set only by teardown
+            (`Viewer.close`, `closeEvent`), which flushes this queue before
+            tearing layers down: an exception escaping there would skip the
+            rest of the cleanup, and skipped Qt teardown is itself a source
+            of segfaults. Every other caller wants the error.
+        """
+        while True:
+            try:
+                event = self._slice_ready_events.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self._on_slice_ready(event)
+            except Exception:
+                if not suppress_errors:
+                    raise
+                logging.getLogger('napari').exception(
+                    'Error handling slice-ready event during teardown: %s',
+                    event,
+                )
+
     def _on_slice_ready(self, event: Event) -> None:
-        """Callback connected to `viewer._layer_slicer.events.ready`.
+        """Handles a slice-ready event queued by `_queue_slice_ready`.
 
         Provides updates after slicing using the slice response data.
         This only gets triggered on the async slicing path.
@@ -904,6 +1016,31 @@ class QtViewer(QSplitter):
             imsave(str(path), img)
         return img
 
+    def _flush_pending_slices(self, timeout: float = 5) -> None:
+        """Block until pending slices are computed *and shown on the canvas*.
+
+        `wait_until_idle` only waits for the slicing futures. Since the slice
+        response is handed to the main thread through
+        `_queue_slice_ready`/`_process_slice_ready_events`, a future can be
+        done while its result is still sitting in `_slice_ready_events`, not
+        yet applied to any visual. Anything that reads pixels has to drain that
+        queue too, or it captures the previous frame - see napari/napari#8033,
+        where a screenshot taken straight after a dims change reproducibly
+        returned the *old* slice, byte for byte, 7 times out of 7.
+
+        With async slicing off there is nothing to drain: the ready event is
+        emitted on the main thread, so the connection runs inline and the
+        visual is already up to date.
+        """
+        try:
+            self.viewer._layer_slicer.wait_until_idle(timeout=timeout)
+        except TimeoutError as e:  # pragma: no cover
+            raise TimeoutError(
+                'Slicing was too slow. Wait for all layers to load before taking a screenshot, '
+                'or disable async slicing in Preferences->Experimental.'
+            ) from e
+        self._process_slice_ready_events()
+
     def _screenshot(
         self,
         flash: bool = True,
@@ -940,13 +1077,7 @@ class QtViewer(QSplitter):
                 f'screenshot size must be 2 values, got {len(size)}'
             )
 
-        try:
-            self.viewer._layer_slicer.wait_until_idle(timeout=5)
-        except TimeoutError as e:  # pragma: no cover
-            raise TimeoutError(
-                'Slicing was too slow. Wait for all layers to load before taking a screenshot, '
-                'or disable async slicing in Preferences->Experimental.'
-            ) from e
+        self._flush_pending_slices()
 
         if fit_to_data_extent:
             # Use the same scene parameter calculations as in viewer_model.fit_to_view
@@ -1348,6 +1479,12 @@ class QtViewer(QSplitter):
         event : qtpy.QtCore.QCloseEvent
             Event from the Qt context.
         """
+        # Flush any already-queued slice-ready events (see
+        # `_queue_slice_ready`/`_drain_slice_ready_events`) while layers are
+        # still valid. Errors are suppressed here so a bad event cannot skip
+        # the teardown below.
+        self._drain_slice_ready_events(suppress_errors=True)
+
         if self._layers is not None:
             # do not create layerlist if it does not exist yet.
             self.layers.close()
@@ -1356,7 +1493,7 @@ class QtViewer(QSplitter):
         # the AnimationThread before close, otherwise it will cause a segFault
         # or Abort trap. (calling stop() when no animation is occurring is also
         # not a problem)
-        self.dims.stop()
+        self.dims._stop_before_destroy()
         self.canvas.delete()
         if self._console is not None:
             self._console.close()

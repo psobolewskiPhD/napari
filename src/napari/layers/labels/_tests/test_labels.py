@@ -1,6 +1,5 @@
 import copy
 import itertools
-import time
 from collections import defaultdict
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -938,18 +937,23 @@ def test_brush_bbox_anisotropic_scale():
 
 
 def test_paint_2d_xarray():
-    """Test the memory usage of painting a xarray indirectly via timeout."""
-    now = time.monotonic()
+    """Painting an xarray must write into it, not into a materialised copy."""
     data = xr.DataArray(np.zeros((3, 3, 1024, 1024), dtype=np.uint32))
+    buffer = data.values
 
     layer = Labels(data)
     layer.brush_size = 12
     layer.mode = 'paint'
     layer.paint((1, 1, 512, 512), 3)
+
     assert isinstance(layer.data, xr.DataArray)
     assert layer.data.sum() == 411
-    elapsed = time.monotonic() - now
-    assert elapsed < 1, 'test was too slow, computation was likely not lazy'
+    # The actual subject of this test, asserted directly rather than through a
+    # wall-clock budget. `paint` must not swap the layer's data for a copy of
+    # the whole 37MB array, so the paint has to be visible in the buffer the
+    # caller still holds.
+    assert np.shares_memory(layer.data.values, buffer)
+    assert buffer.sum() == 411
 
 
 def test_paint_3d():

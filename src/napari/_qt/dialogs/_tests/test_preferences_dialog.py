@@ -13,6 +13,7 @@ from napari._qt.dialogs.preferences_dialog import (
     PreferencesDialog,
     QMessageBox,
 )
+from napari._qt.widgets.qt_keyboard_settings import EditorWidget
 from napari._tests.utils import skip_local_focus, skip_on_mac_ci
 from napari._vendor.qt_json_builder.qt_jsonschema_form.widgets import (
     EnumSchemaWidget,
@@ -59,6 +60,31 @@ def pref(qtbot):
         'napari:toggle_selected_visibility'
     ] == [KeyBinding.from_str('U')]
     return dlg
+
+
+TOGGLE_VISIBILITY_ACTION = 'napari:toggle_selected_visibility'
+
+
+def _row_for_action(shortcut_widget, action_name: str) -> int:
+    """Return the shortcut table row holding ``action_name``.
+
+    The table is built with ``enumerate(actions.items())``, so a row index is
+    only meaningful for one particular set of registered actions - and that set
+    grows as earlier tests create viewers and layers. Hard-coding an index made
+    these tests pass only when their file-mates had run first and shifted the
+    wanted action onto that row; run alone they read a different action's
+    keybinding. The action name is kept in the hidden ``_action_col`` for
+    exactly this kind of lookup.
+    """
+    table = shortcut_widget._table
+    for row in range(table.rowCount()):
+        item = table.item(row, shortcut_widget._action_col)
+        if item is not None and item.text() == action_name:
+            return row
+    raise AssertionError(
+        f'{action_name!r} is not in the shortcut table '
+        f'({table.rowCount()} rows)'
+    )
 
 
 def test_prefdialog_populated(pref):
@@ -320,11 +346,11 @@ def test_preferences_dialog_restore(qtbot, pref, monkeypatch):
     assert get_settings().shortcuts.shortcuts[
         'napari:toggle_selected_visibility'
     ] == [KeyBinding.from_str('U')]
+    row = _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION)
     assert KeyBinding.from_str(
         Shortcut.parse_platform(
-            # 12 is the row for 'napari:toggle_selected_visibility'
             shortcut_widget._table.item(
-                12, shortcut_widget._shortcut_col
+                row, shortcut_widget._shortcut_col
             ).text()
         )
     ) == KeyBinding.from_str('U')
@@ -344,8 +370,7 @@ def test_preferences_dialog_restore(qtbot, pref, monkeypatch):
     assert KeyBinding.from_str(
         Shortcut.parse_platform(
             shortcut_widget._table.item(
-                # 12 is the row index for 'napari:toggle_selected_visibility'
-                12,
+                _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION),
                 shortcut_widget._shortcut_col,
             ).text()
         )
@@ -375,34 +400,57 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
     # ensure the dialog is showing
     pref.show()
     qtbot.waitExposed(pref)
+    # Under parallel xdist workers sharing one display, another worker's
+    # window can win OS-level activation right after this one gets it.
+    pref.activateWindow()
+    qtbot.waitActive(pref)
     assert pref.isVisible()
-    # 12 is the row for 'napari:toggle_selected_visibility'
+    row = _row_for_action(shortcut_widget, TOGGLE_VISIBILITY_ACTION)
     shortcut = shortcut_widget._table.item(
-        12, shortcut_widget._shortcut_col
+        row, shortcut_widget._shortcut_col
     ).text()
     assert shortcut == 'U'
 
     x = shortcut_widget._table.columnViewportPosition(
         shortcut_widget._shortcut_col
     )
-    # 12 is the row for 'napari:toggle_selected_visibility'
-    y = shortcut_widget._table.rowViewportPosition(12)
+    y = shortcut_widget._table.rowViewportPosition(row)
 
     item_pos = QPoint(x, y)
-    qtbot.mouseClick(
-        shortcut_widget._table.viewport(),
-        Qt.MouseButton.LeftButton,
-        pos=item_pos,
+    model_index = shortcut_widget._table.model().index(
+        row, shortcut_widget._shortcut_col
     )
-    qtbot.mouseDClick(
-        shortcut_widget._table.viewport(),
-        Qt.MouseButton.LeftButton,
-        pos=item_pos,
-    )
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is not None)
+
+    def _open_editor() -> bool:
+        # Under parallel xdist workers, another worker's window can steal
+        # OS-level activation right as we click, so a single attempt isn't
+        # reliable - reassert activation and retry on every poll. Once an
+        # editor already exists, just refocus it instead of clicking again:
+        # a stray click/double-click on a *live* QLineEdit editor moves the
+        # cursor or selects text rather than reopening it, corrupting the
+        # in-progress edit.
+        pref.activateWindow()
+        existing_editor = shortcut_widget._table.indexWidget(model_index)
+        if isinstance(existing_editor, EditorWidget):
+            existing_editor.setFocus()
+        else:
+            qtbot.mouseClick(
+                shortcut_widget._table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=item_pos,
+            )
+            qtbot.mouseDClick(
+                shortcut_widget._table.viewport(),
+                Qt.MouseButton.LeftButton,
+                pos=item_pos,
+            )
+        return isinstance(QApplication.focusWidget(), EditorWidget)
+
+    # wait for the cell editor itself (not just any widget) to take focus
+    qtbot.waitUntil(_open_editor)
 
     editor = QApplication.focusWidget()
-    assert editor is not None
+    assert editor.text() == 'U'
     # Send a ShortcutOverride event to trigger Delete handling,
     # which clears the selected shortcut text
     delete_event = QKeyEvent(
@@ -411,9 +459,15 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(editor, delete_event)
-    qtbot.wait(100)
+    assert editor.text() == ''
 
-    # Confirm the change with the given key
+    # Confirm the change with the given key.
+    # Both sends are synchronous, so the event loop must not spin in between:
+    # if the dialog window loses activation (which happens on the shared
+    # display when tests run in parallel), Qt's item delegate event filter
+    # commits and closes the editor on focus out, deleting it via
+    # `deleteLater()`. Spinning the event loop here would run that deletion
+    # and leave `editor` a dangling C++ object.
     confirm_key_map = {
         'enter': Qt.Key.Key_Enter,
         'return': Qt.Key.Key_Return,
@@ -427,7 +481,7 @@ def test_preferences_dialog_not_dismissed_by_keybind_confirm(
 
     # verify that the keybind is changed
     shortcut = shortcut_widget._table.item(
-        12, shortcut_widget._shortcut_col
+        row, shortcut_widget._shortcut_col
     ).text()
     assert shortcut == ''
 
