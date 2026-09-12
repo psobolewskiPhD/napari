@@ -194,33 +194,70 @@ def test_show_shortcuts_actions(make_napari_viewer):
     viewer.window._pref_dialog.close()
 
 
-def test_image_from_clipboard(make_napari_viewer, monkeypatch):
+@pytest.fixture
+def private_clipboard(monkeypatch):
+    """A clipboard no other process on the display can reach.
+
+    The clipboard is one resource per display, so under pytest-xdist a
+    concurrently running worker can own it at any moment. That breaks the two
+    tests below in different ways: a foreign `setText` makes
+    `_image_from_clipboard` report the wrong thing, and taking the X11
+    selection owner can fail outright, which Qt reports as
+    `QXcbClipboard::setMimeData: Cannot set X11 selection owner` and does not
+    retry.
+
+    Neither test is checking Qt's clipboard integration; they check what napari
+    does with a clipboard. So keep it in-process. Patching `QGuiApplication` is
+    enough for both production paths - `QtViewer.clipboard` calls
+    `QGuiApplication.clipboard()` and `Window.clipboard` calls
+    `QApplication.clipboard()`, and the latter resolves to the patched method
+    through the MRO (checked, rather than assumed).
+
+    A plain class rather than a Mock: patching a method of a QObject subclass
+    with a Mock upsets PySide6's metaobject introspection.
+    """
+
+    class _LocalClipboard:
+        def __init__(self):
+            self._mime = QMimeData()
+            self._image = QImage()
+
+        def mimeData(self, *_):
+            return self._mime
+
+        def setMimeData(self, mime_data, *_):
+            self._mime = mime_data
+
+        def image(self, *_):
+            return self._image
+
+        def setImage(self, image, *_):
+            self._image = image
+
+        def setText(self, text, *_):
+            self._mime = QMimeData()
+            self._mime.setText(text)
+
+        def text(self, *_):
+            return self._mime.text()
+
+        def clear(self, *_):
+            self._mime = QMimeData()
+            self._image = QImage()
+
+    clipboard = _LocalClipboard()
+    monkeypatch.setattr(QGuiApplication, 'clipboard', lambda *_: clipboard)
+    return clipboard
+
+
+def test_image_from_clipboard(make_napari_viewer, private_clipboard):
     make_napari_viewer()
     app = get_app_model()
 
-    # The clipboard is a single resource shared by every process on the
-    # display, so `clear()` here does not mean it stays empty: under
-    # pytest-xdist another worker can take ownership of it at any moment, and
-    # `test_qaction_layer.py` does exactly that, putting JSON text on it. That
-    # makes `mime.hasText()` true, and `_image_from_clipboard` then emits an
-    # extra 'trying to parse text in clipboard as a link' message before the
-    # one asserted below - seen on CI as "Expected 'show_info' to be called
-    # once. Called 2 times."
-    #
     # This test is about what the command does when the clipboard holds
-    # nothing useful, so supply exactly that instead of asking the display for
-    # it. A plain class rather than a Mock: patching a method of a QObject
-    # subclass with a Mock upsets PySide6's metaobject introspection.
-    class _EmptyClipboard:
-        def mimeData(self):
-            return QMimeData()
-
-        def image(self):
-            return QImage()
-
-    monkeypatch.setattr(
-        QGuiApplication, 'clipboard', lambda *_: _EmptyClipboard()
-    )
+    # nothing useful, so supply exactly that rather than asking the display -
+    # where another worker's `setText` would make `mime.hasText()` true and
+    # produce a second `show_info` call. See `private_clipboard`.
     assert QGuiApplication.clipboard().image().isNull()
 
     # Check action command execution
@@ -457,7 +494,7 @@ def test_screenshot(
     ],
 )
 def test_screenshot_to_clipboard(
-    make_napari_viewer, qtbot, monkeypatch, action_id
+    make_napari_viewer, monkeypatch, private_clipboard, action_id
 ):
     """Test screenshot to clipboard actions can be triggered."""
     viewer = make_napari_viewer()
@@ -486,28 +523,23 @@ def test_screenshot_to_clipboard(
 
     # ---- Ensure clipboard is empty
     QGuiApplication.clipboard().clear()
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert clipboard_image.isNull()
+    assert QGuiApplication.clipboard().image().isNull()
 
-    # ---- Execute action, retrying the copy rather than the whole command.
-    # Taking ownership of the X11 clipboard selection is a shared, per-display
-    # operation that can fail outright under concurrent xdist workers - Qt logs
-    # `QXcbClipboard::setMimeData: Cannot set X11 selection owner` and does not
-    # retry - so the image never arrives and no amount of waiting helps. Retry
-    # the write itself. The command is re-executed, so assert on the flash
-    # after the loop rather than once per attempt.
-    def _clipboard_has_image() -> bool:
-        if QGuiApplication.clipboard().image().isNull():
-            app.commands.execute_command(action_id)
-        return not QGuiApplication.clipboard().image().isNull()
-
-    qtbot.waitUntil(_clipboard_has_image, timeout=5000)
+    # ---- Execute action. On the real clipboard this needed a retry, because
+    # taking the X11 selection owner is a shared, per-display operation that
+    # can fail outright under concurrent xdist workers. Retrying did not
+    # actually fix it: the predicate re-ran the whole screenshot, so a 5s
+    # budget bought about three attempts on a coverage job, and all three lost
+    # the same race. Ownership is exclusive, so re-issuing the write is still
+    # just waiting for another process to let go. What this test checks is that
+    # the command is wired up and puts an image on the clipboard, which does
+    # not need the display's - see `private_clipboard`.
+    app.commands.execute_command(action_id)
 
     assert flashed, 'the screenshot command did not flash the viewer'
     assert set(flashed) == {'_QtMainWindow'}, flashed
     # ---- Ensure clipboard has image
-    clipboard_image = QGuiApplication.clipboard().image()
-    assert not clipboard_image.isNull()
+    assert not QGuiApplication.clipboard().image().isNull()
 
 
 @pytest.mark.parametrize(
