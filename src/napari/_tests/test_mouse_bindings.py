@@ -281,7 +281,12 @@ def test_unselected_layer_mouse_bindings(qtbot, make_napari_viewer):
     ],
 )
 def test_highlight_box_handles(position, dims_displayed, nearby_handle):
-    layer = Image(np.empty((10, 10)))
+    # `np.zeros`, not `np.empty`: these tests assert on box handles and the
+    # affine, so the pixel values are irrelevant - but `Image` computes contrast
+    # limits from them, and uninitialised memory can contain a signaling-NaN bit
+    # pattern. Any arithmetic on one raises the IEEE invalid flag, which
+    # `filterwarnings` turns into a failure. See `test_transform_box` below.
+    layer = Image(np.zeros((10, 10)))
     event = Mock(
         position=position, dims_displayed=dims_displayed, modifiers=[None]
     )
@@ -294,7 +299,16 @@ def test_highlight_box_handles(position, dims_displayed, nearby_handle):
 
 
 def test_transform_box():
-    layer = Image(np.empty((10, 10)))
+    # `np.zeros`, not `np.empty` - see above. `np.empty` returns uninitialised
+    # memory, so this test's input was whatever bytes the allocator handed back.
+    # On one CI run those included a signaling NaN, and `Image.__init__` derived
+    # contrast limits large enough to take `scale_down`, so
+    # `CoercedContrastLimits.coerce_data`'s `data * self.scale` raised
+    # `RuntimeWarning: invalid value encountered in multiply`. A quiet NaN or an
+    # inf would not have: for multiplication, IEEE 754 raises *invalid* only for
+    # `0 * inf` or a signaling-NaN operand, and the run's scale was finite and
+    # non-zero.
+    layer = Image(np.zeros((10, 10)))
     event = Mock(position=[0, 3], dims_displayed=[0, 1], modifiers=[None])
     next(transform_with_box(layer, event))
     # no interaction has been done so affine should be the same as the initial
