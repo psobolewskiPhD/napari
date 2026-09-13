@@ -594,6 +594,16 @@ class AnimationThread(QThread):
     def run(self):
         self.work()
 
+    def start(
+        self,
+        priority: QThread.Priority = QThread.Priority.InheritPriority,
+    ) -> None:
+        """Reset the stop event before the worker can begin running."""
+        if self.isRunning():
+            return
+        self._waiter.clear()
+        super().start(priority)
+
     @property
     def slider(self) -> QtDimSliderWidget | None:
         """Return the slider for this animation thread."""
@@ -643,7 +653,6 @@ class AnimationThread(QThread):
         else:
             # immediately advance one frame
             self.advance()
-        self._waiter.clear()
         self._waiter.wait(self.interval / 1000)
         while not self._waiter.is_set():
             self.advance()
@@ -706,31 +715,34 @@ class AnimationThread(QThread):
         Takes dims scale into account and restricts the animation to the
         requested frame_range, if entered.
         """
+        slider = self.slider
+        if slider is None or slider.axis >= slider.dims.ndim:
+            return self.finish()
+
+        axis = slider.axis
+        dims = slider.dims
+        loop_mode = slider.loop_mode
         self.current += self.step * self.dims_range[2]
         if self.current < self.min_point:
-            if (
-                self.loop_mode == LoopMode.BACK_AND_FORTH
-            ):  # 'loop_back_and_forth'
+            if loop_mode == LoopMode.BACK_AND_FORTH:  # 'loop_back_and_forth'
                 self.step *= -1
                 self.current = self.min_point + self.step * self.dims_range[2]
-            elif self.loop_mode == LoopMode.LOOP:  # 'loop'
+            elif loop_mode == LoopMode.LOOP:  # 'loop'
                 self.current = self.max_point + self.current - self.min_point
             else:  # loop_mode == 'once'
                 return self.finish()
         elif self.current >= self.max_point:
-            if (
-                self.loop_mode == LoopMode.BACK_AND_FORTH
-            ):  # 'loop_back_and_forth'
+            if loop_mode == LoopMode.BACK_AND_FORTH:  # 'loop_back_and_forth'
                 self.step *= -1
                 self.current = (
                     self.max_point + 2 * self.step * self.dims_range[2]
                 )
-            elif self.loop_mode == LoopMode.LOOP:  # 'loop'
+            elif loop_mode == LoopMode.LOOP:  # 'loop'
                 self.current = self.min_point + self.current - self.max_point
             else:  # loop_mode == 'once'
                 return self.finish()
-        with self.dims.events.current_step.blocker(self._on_axis_changed):
-            self.frame_requested.emit(self.axis, self.current)
+        with dims.events.current_step.blocker(self._on_axis_changed):
+            self.frame_requested.emit(axis, self.current)
         # self.timer.start()
         return None
 
@@ -755,9 +767,11 @@ class AnimationThread(QThread):
 
     def _on_axis_changed(self):
         """Update the current frame if the axis has changed."""
-        # slot for external events to update the current frame
-        if self.dims is not None:
-            self.current = self.dims.current_step[self.axis]
+        slider = self.slider
+        if slider is None or slider.axis >= slider.dims.ndim:
+            self.finish()
+            return
+        self.current = slider.dims.current_step[slider.axis]
 
 
 class QMarginSlidersPopup(QMirroredSlidersPopup):

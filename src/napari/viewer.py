@@ -250,6 +250,14 @@ class Viewer(ViewerModel):
         image : array
             Numpy array of type ubyte and shape (h, w, 4). Index [0, 0] is the
             upper-left corner of the rendered region.
+
+        Raises
+        ------
+        TimeoutError
+            If async slicing is enabled and a pending slice does not arrive in
+            time. Waiting for it is what stops a stale frame being captured
+            (napari/napari#8033), so this is reported rather than silently
+            returning the previous slice.
         """
         return self.window.screenshot(
             path=path,
@@ -267,6 +275,24 @@ class Viewer(ViewerModel):
         """Close the viewer window."""
         # Shutdown the slicer first to avoid processing any more tasks.
         self._layer_slicer.shutdown()
+        # `shutdown()` only waits for in-flight slicing computations to
+        # finish; the completion callback each one queues (see
+        # `QtViewer._queue_slice_ready`/`_drain_slice_ready_events`) is only
+        # drained when that queued call reaches the main thread, so it can
+        # still be pending here. Flush it now, while layers are still valid,
+        # rather than let it fire later against layers this method is about
+        # to clear. Errors are suppressed so a bad event cannot skip the
+        # rest of this teardown.
+        #
+        # Guarded the way `Window.close()` guards itself, and for the same
+        # reason: closing twice is expected (`close_all()` alongside an
+        # explicit close, say), and the first close does `del self._qt_window`
+        # - which is exactly what the `Window._qt_viewer` property reads
+        # through, so reaching for it unguarded would raise on the second.
+        if hasattr(self.window, '_qt_window'):
+            self.window._qt_viewer._drain_slice_ready_events(
+                suppress_errors=True
+            )
         # Disconnect changes to dims before removing layers one-by-one
         # to avoid any unnecessary slicing.
         disconnect_events(self.dims.events, self)

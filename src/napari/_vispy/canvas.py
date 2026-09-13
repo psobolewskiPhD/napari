@@ -1078,6 +1078,7 @@ class VispyCanvas:
             return
 
         callback = self._overlay_callbacks.get(layer)
+        attached_to_layer_node = False
         for overlay in layer._overlays.values():
             # only create overlays when they are visible. If not, we connect the visible
             # event of this overlay to this method until it's finally visible
@@ -1108,6 +1109,7 @@ class VispyCanvas:
                     parent = self.view
             else:
                 parent = self.layer_to_visual[layer].node
+                attached_to_layer_node = True
 
             vispy_overlay = self._create_or_update_vispy_overlay(
                 overlay=overlay,
@@ -1117,6 +1119,20 @@ class VispyCanvas:
             )
 
             overlay_to_visual[overlay] = vispy_overlay
+
+        if attached_to_layer_node:
+            # Scene overlays are parented to the layer's node, and rely on the
+            # compensating transform that `VispyBaseLayer._on_matrix_change`
+            # pushes onto that node's children - which undoes the layer node's
+            # own translation so overlays stay at the full data extent.
+            #
+            # That push only happens when the layer's matrix changes, so an
+            # overlay parented afterwards keeps an identity transform until
+            # something unrelated triggers a refresh. For a multiscale layer
+            # that leaves the bounding box offset by half a pixel of the
+            # displayed level - half a level-0 pixel when zoomed in, and more
+            # at coarser levels. Push it now, for the overlay we just attached.
+            self.layer_to_visual[layer]._on_matrix_change()
 
         self._update_overlay_canvas_positions()
 

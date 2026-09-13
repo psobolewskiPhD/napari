@@ -87,11 +87,27 @@ class _LayerSlicer:
     ------
     ready
         emitted after slicing is done with a dict value that maps from layer
-        to slice response. Note that this may be emitted on the main or
-        a non-main thread. If usage of this event relies on something happening
-        on the main thread, actions should be taken to ensure that the callback
-        is also executed on the main thread (e.g. by decorating the callback
-        with `@ensure_main_thread`).
+        to slice response.
+
+        This is only emitted on the async path, and always from the slicing
+        thread: it is emitted by ``_slice_layers``, which only ever runs via
+        ``_executor.submit``. When slicing synchronously - including whenever
+        ``experimental.async_`` is off - no task is submitted and this never
+        fires at all.
+
+        A callback that needs the main thread must therefore hand the work
+        over itself, and must do so *without* constructing any Qt object on
+        the slicing thread. In particular, do not decorate the callback with
+        ``superqt.ensure_main_thread``: to hop threads it creates a throwaway
+        QObject on the calling thread, which has been observed to deadlock
+        against the main thread constructing its own Qt objects at the same
+        moment (napari/napari#8145, napari/napari#9192).
+
+        The safe shape is to put the event on a plain thread-safe queue and
+        then notify an object that already lives on the main thread, so
+        nothing new is constructed here - see
+        ``QtViewer._queue_slice_ready`` and
+        ``QtViewer._process_slice_ready_events``.
     """
 
     def __init__(self) -> None:
@@ -271,7 +287,12 @@ class _LayerSlicer:
     def _slice_layers(self, requests: dict) -> dict:
         """
         Iterates through a dictionary of request objects and call the slice
-        on each individual layer. Can be called from the main or slicing thread.
+        on each individual layer.
+
+        Runs on the slicing thread: the only caller is ``_executor.submit`` in
+        ``submit``. Note this emits ``events.ready`` before returning, so that
+        event is delivered on this thread too - see the class docstring for
+        what a listener may safely do with it.
 
         Attributes
         ----------

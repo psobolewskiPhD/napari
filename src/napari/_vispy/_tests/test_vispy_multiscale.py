@@ -1,6 +1,13 @@
 import numpy as np
+import pytest
 
 from napari._tests.utils import skip_local_popups, skip_on_win_ci
+
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
 
 
 def test_multiscale(make_napari_viewer):
@@ -41,9 +48,17 @@ def test_multiscale(make_napari_viewer):
     assert value[1] is None
 
 
+#: The throttle interval `VispyCanvas.__init__` gives its mouse-move handler
+#: (`qthrottled(self._on_mouse_move, timeout=5)`). Kept here so the pump in
+#: `test_multiscale_zoom_in_within_level_does_not_refresh` is traceable to it.
+_MOUSE_MOVE_THROTTLE_MS = 5
+
+
 @skip_on_win_ci
 @skip_local_popups
-def test_multiscale_zoom_in_within_level_does_not_refresh(make_napari_viewer):
+def test_multiscale_zoom_in_within_level_does_not_refresh(
+    make_napari_viewer, qtbot
+):
     """Ensure zooming in within the same level does not trigger a refresh."""
     viewer = make_napari_viewer(show=True)
     view = viewer.window._qt_viewer
@@ -64,6 +79,20 @@ def test_multiscale_zoom_in_within_level_does_not_refresh(make_napari_viewer):
 
     assert layer.data_level == 0
     np.testing.assert_array_equal(layer.corner_pixels, initial_corners)
+
+    # `on_draw()` is invoked directly above, so this test never returns to the
+    # Qt event loop. The canvas connects its mouse-move handler through
+    # `qthrottled(..., timeout=5)`, whose QTimer is therefore still 'active'
+    # at teardown - not because its 5ms have not elapsed, but because nothing
+    # ever gave the loop a chance to fire it - and the dangling-QTimer check
+    # reports it as a leak.
+    #
+    # This is a pump, not a settle: there is no signal or predicate to wait
+    # on (a `ThrottledCallable`'s timer is private, and polling a timer this
+    # code may not even own would be a check that silently passes). So spin
+    # the loop for twice the throttle interval, which is derived from
+    # `VispyCanvas.__init__`'s `timeout=5` rather than guessed.
+    qtbot.wait(2 * _MOUSE_MOVE_THROTTLE_MS)
 
 
 def test_3D_multiscale_image(make_napari_viewer):

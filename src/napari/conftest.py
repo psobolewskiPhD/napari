@@ -32,9 +32,11 @@ Notes for using the plugin-related fixtures here:
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import sys
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from datetime import timedelta
@@ -43,7 +45,7 @@ from itertools import chain
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from unittest.mock import MagicMock
 from weakref import WeakKeyDictionary
 
@@ -61,6 +63,8 @@ from napari.layers import Image, Labels, Points, Shapes, Vectors
 from napari.utils.misc import ROOT_DIR
 
 if TYPE_CHECKING:
+    from collections.abc import Container
+
     from npe2._pytest_plugin import TestPluginManager
     from pytestqt.qtbot import QtBot
 
@@ -278,6 +282,17 @@ def _fresh_settings(monkeypatch):
     return
 
 
+def _reset_dask_threadpool() -> None:
+    """Shut down `dask.threaded.default_pool` and clear it, if there is one."""
+    pool = dask.threaded.default_pool
+    if isinstance(pool, ThreadPool):
+        pool.close()
+        pool.join()
+    elif pool is not None:
+        pool.shutdown()
+    dask.threaded.default_pool = None
+
+
 @pytest.fixture(autouse=True)
 def _auto_shutdown_dask_threadworkers():
     """
@@ -286,16 +301,62 @@ def _auto_shutdown_dask_threadworkers():
     We don't assert the number of threads in unchanged as other things
     modify the number of threads.
     """
-    assert dask.threaded.default_pool is None
+    # This fixture's own `finally` below always resets the pool, so a leftover
+    # one here means a previous test leaked it. Reset before failing so that
+    # the leak does not cascade into failures across the rest of an xdist
+    # worker's tests.
+    if dask.threaded.default_pool is not None:
+        _reset_dask_threadpool()
+        pytest.fail(
+            'dask.threaded.default_pool was not None at test start '
+            '(a previous test likely leaked it); it has been reset.'
+        )
+
     try:
         yield
     finally:
-        if isinstance(dask.threaded.default_pool, ThreadPool):
-            dask.threaded.default_pool.close()
-            dask.threaded.default_pool.join()
-        elif dask.threaded.default_pool:
-            dask.threaded.default_pool.shutdown()
-        dask.threaded.default_pool = None
+        _reset_dask_threadpool()
+
+
+@pytest.fixture(autouse=True)
+def _auto_shutdown_zarr_iothread():
+    """
+    This automatically shuts down zarr's background IO thread and executor.
+
+    Like dask's threadpool above, zarr lazily creates a long-lived background
+    thread (and threadpool executor) for async I/O on first use, and only
+    tears it down at process exit via `atexit`. Left dangling between tests,
+    delayed work on that thread can end up touching objects that a later
+    test has already torn down.
+    """
+    try:
+        yield
+    finally:
+        # Nothing to do unless zarr's sync machinery was actually imported:
+        # the loop lives inside that module and is created lazily, so a test
+        # that never touched zarr cannot have one. Checking `sys.modules`
+        # rather than importing keeps every unrelated test's teardown from
+        # pulling zarr in.
+        if 'zarr.core.sync' in sys.modules:
+            # `zarr.core.sync` is zarr's internal module, not public API, so
+            # pin the behaviour we rely on rather than let a zarr refactor
+            # turn every test's teardown into an ImportError: `loop` is a
+            # one-element list holding the lazily created event loop, and
+            # `cleanup_resources()` shuts it (and the executor) down and sets
+            # `loop[0]` back to None. Verified against zarr 3.x; `napari`
+            # requires zarr>=3.0.8.
+            try:
+                from zarr.core.sync import cleanup_resources, loop
+            except ImportError:  # pragma: no cover - zarr internals moved
+                warnings.warn(
+                    'Could not reach zarr.core.sync to shut down its '
+                    'background IO thread between tests; zarr internals have '
+                    'moved and this fixture needs updating.',
+                    stacklevel=2,
+                )
+            else:
+                if loop[0] is not None:
+                    cleanup_resources()
 
 
 # this is not the proper way to configure IPython, but it's an easy one.
@@ -340,7 +401,7 @@ def plugin_settings_(plugin_settings):
 
     Without this, whichever test happens to call `get_plugin_settings`
     first (e.g. by constructing a `PreferencesDialog`) would populate and
-    freeze `_PLUGIN_PREFERENCES` for the rest of the session, against the
+    freeze `_PLUGIN_SETTINGS` for the rest of the session, against the
     real user config directory.
     """
     return plugin_settings
@@ -745,6 +806,7 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
 
     base_start = QThread.start
     thread_dict = WeakKeyDictionary()
+    request.node.stash[_PENDING_THREADS_KEY] = thread_dict
     base_constructor = QThread.__init__
 
     def run_with_trace(self):  # pragma: no cover
@@ -813,6 +875,19 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
             thread.quit()
             qtbot.waitUntil(thread.isFinished, timeout=2000)
 
+    dangling_places = [calling for _, calling in dangling_threads_li]
+    # Threads the `pytest_runtest_teardown` hookimpl had to stop before
+    # pytest-qt's event pump could deliver a queued `deleteLater()` to their
+    # parent widget are no longer running, so the loop above cannot see them.
+    # They were still left running by this test, and destroying a running
+    # QThread is a fatal abort, so report them as leaks all the same.
+    dangling_places += [
+        f'{calling} (still running before pytest-qt pumped the event loop, so '
+        'it was force-stopped to keep a queued deleteLater() from destroying '
+        'it mid-run)'
+        for calling in request.node.stash.get(_FORCE_STOPPED_THREADS_KEY, [])
+    ]
+
     long_desc = (
         'If you see this error, it means that a QThread was started in a test '
         'but not terminated. This can cause segfaults in the test suite. '
@@ -823,14 +898,12 @@ def _dangling_qthreads(monkeypatch, qtbot, request):
         'QThread class to do nothing.\n'
     )
 
-    if len(dangling_threads_li) > 1:
+    if len(dangling_places) > 1:
         long_desc += ' The QThreads were started in:\n'
     else:
         long_desc += ' The QThread was started in:\n'
 
-    assert not dangling_threads_li, long_desc + '\n'.join(
-        x[1] for x in dangling_threads_li
-    )
+    assert not dangling_places, long_desc + '\n'.join(dangling_places)
 
 
 @pytest.fixture
@@ -889,6 +962,107 @@ def _dangling_qthread_pool(monkeypatch, request):
     )
 
 
+# Shared between `_dangling_qtimers`/`_dangling_qthreads` and the
+# `pytest_runtest_teardown` hookimpl below: those fixtures' own finalizers run
+# too late to prevent the crashes they detect. `pytest-qt`'s own
+# `pytest_runtest_teardown` hookimpl pumps the Qt event loop (to flush pending
+# events between tests) and, because it has no `tryfirst`, it runs *before*
+# our fixture finalizers under pluggy's LIFO ordering. Two ways that bites:
+#
+# - A `QTimer.singleShot` from the finished test can still be pending (e.g.
+#   `superqt`'s `WorkerBase.start()` defers submitting a `QRunnable` to
+#   `QThreadPool` by 1ms when called from a running event loop). The pump can
+#   fire it *after* the test's own widgets/objects have already been torn
+#   down, crashing the whole process (`QRunnable::warnNullCallable` -> abort).
+# - A still-running `QThread` (e.g. `AnimationThread` in `qt_dims_slider.py`)
+#   can be a child of a widget with a queued `deleteLater()`. The pump
+#   delivers that deferred deletion, and Qt fatally aborts if a `QThread` is
+#   destroyed while still running.
+#
+# Both are prevented by acting in a `tryfirst` hookimpl, which guarantees we
+# run before any non-tryfirst teardown hookimpl, regardless of fixture
+# teardown order.
+#
+# Acting that early has a catch: the fixtures decide what leaked by looking at
+# `isActive()`/`isRunning()`, and stopping something makes it look clean. Left
+# alone, this hookimpl would silently disable the very checks it exists to
+# protect. So it records what it had to force-stop, keyed per resource, and the
+# fixtures fold those records back into their own reports - see
+# `_FORCE_STOPPED_*_KEY` below.
+#: `(started_timers, single_shot_timers)` from `_dangling_qtimers`. Both
+#: halves matter: a timer left running by `QTimer.start()` can fire into a
+#: torn-down test during pytest-qt's event pump exactly as a `singleShot` can.
+_PENDING_TIMERS_KEY: pytest.StashKey[tuple] = pytest.StashKey()
+_PENDING_THREADS_KEY: pytest.StashKey[WeakKeyDictionary] = pytest.StashKey()
+
+# Calling places of resources this hookimpl force-stopped, so that
+# `_dangling_qtimers`/`_dangling_qthreads` can still report them as leaks.
+_FORCE_STOPPED_TIMERS_KEY: pytest.StashKey[list] = pytest.StashKey()
+_FORCE_STOPPED_THREADS_KEY: pytest.StashKey[list] = pytest.StashKey()
+
+
+def _stop_thread_early(thread) -> None:
+    """Best-effort graceful stop, used before any event-loop pump can risk
+    destroying `thread` while it's still running (see comment above)."""
+    from qtpy.QtCore import QThread
+
+    stop = getattr(thread, '_stop', None)
+    if stop is None and type(thread).terminate is not QThread.terminate:
+        # an overridden `terminate()` (e.g. StatusChecker's) is a graceful
+        # stop request; the base QThread.terminate() is a dangerous forced
+        # kill, so it's deliberately never called here.
+        stop = thread.terminate
+    if stop is not None:
+        with contextlib.suppress(RuntimeError):
+            stop()
+    with contextlib.suppress(RuntimeError):
+        thread.quit()
+    with contextlib.suppress(RuntimeError):
+        thread.wait(2000)
+
+
+def _is_live(qt_object, predicate_name: str) -> bool:
+    """Call `isActive()`/`isRunning()`, treating a dead C++ object as not live."""
+    try:
+        return bool(getattr(qt_object, predicate_name)())
+    except RuntimeError:
+        return False
+
+
+def force_stop_pending_qt_resources(item):
+    """Stop timers/threads this test left running, before anything pumps events.
+
+    Called from the `tryfirst` `pytest_runtest_teardown` hookimpls at the
+    bottom of this file and in `napari_builtins/conftest.py`. A conftest only
+    applies to items below its own directory, so `napari_builtins` needs its
+    own hook rather than inheriting this one - see `pytest_runtest_setup`
+    below for why that does not double-register.
+    """
+    stopped_timers = item.stash.setdefault(_FORCE_STOPPED_TIMERS_KEY, [])
+    started_timers, single_shot_timers = item.stash.get(
+        _PENDING_TIMERS_KEY, ({}, [])
+    )
+    # `list()` the WeakKeyDictionary: stopping a timer can drop the last
+    # reference to another, and mutating it mid-iteration would raise.
+    for timer, calling in chain(
+        list(started_timers.items()), single_shot_timers
+    ):
+        if _is_live(timer, 'isActive'):
+            # record before stopping: a resource we then fail to stop matters
+            # more, not less.
+            stopped_timers.append(calling)
+            with contextlib.suppress(RuntimeError):
+                timer.stop()
+
+    stopped_threads = item.stash.setdefault(_FORCE_STOPPED_THREADS_KEY, [])
+    for thread, calling in list(
+        item.stash.get(_PENDING_THREADS_KEY, {}).items()
+    ):
+        if _is_live(thread, 'isRunning'):
+            stopped_threads.append(calling)
+            _stop_thread_early(thread)
+
+
 @pytest.fixture
 def _dangling_qtimers(monkeypatch, request):
     from qtpy.QtCore import QTimer
@@ -896,6 +1070,7 @@ def _dangling_qtimers(monkeypatch, request):
     base_start = QTimer.start
     timer_dkt = WeakKeyDictionary()
     single_shot_list = []
+    request.node.stash[_PENDING_TIMERS_KEY] = (timer_dkt, single_shot_list)
 
     if 'disable_qtimer_start' in request.keywords:
         from pytestqt.qt_compat import qt_api
@@ -954,12 +1129,28 @@ def _dangling_qtimers(monkeypatch, request):
     dangling_timers = []
 
     for timer, calling in chain(timer_dkt.items(), single_shot_list):
-        if timer.isActive():
+        # `_is_live` rather than a bare `isActive()`: a timer whose C++ object
+        # has already been deleted raises RuntimeError from that call, and a
+        # deleted timer is by definition not still active. Same guard
+        # `_dangling_qanimations` needed for its `state()` read.
+        if _is_live(timer, 'isActive'):
             dangling_timers.append((timer, calling))
 
     for timer, _ in dangling_timers:
         with suppress(RuntimeError):
             timer.stop()
+
+    dangling_places = [calling for _, calling in dangling_timers]
+    # Timers the `pytest_runtest_teardown` hookimpl above had to stop before
+    # pytest-qt's event pump could fire them are no longer active, so the loop
+    # above cannot see them - but they were still left running by this test,
+    # which is exactly the hazard. Report them too, tagged so they can be told
+    # apart from a timer that was still active at fixture-teardown time.
+    dangling_places += [
+        f'{calling} (still active before pytest-qt pumped the event loop, so '
+        'it was force-stopped to keep it from firing into a torn-down test)'
+        for calling in request.node.stash.get(_FORCE_STOPPED_TIMERS_KEY, [])
+    ]
 
     long_desc = (
         'If you see this error, it means that a QTimer was started but not stopped. '
@@ -967,7 +1158,7 @@ def _dangling_qtimers(monkeypatch, request):
         'If this test does not require a QTimer to pass you could monkeypatch it out. '
         'If it does require a QTimer, you should stop or wait for it to finish before test ends. '
     )
-    if len(dangling_timers) > 1:
+    if len(dangling_places) > 1:
         long_desc += 'The QTimers were started in:\n'
     else:
         long_desc += 'The QTimer was started in:\n'
@@ -982,8 +1173,8 @@ def _dangling_qtimers(monkeypatch, request):
             )
         return path
 
-    assert not dangling_timers, long_desc + '\n'.join(
-        _check_throttle_info(x[1]) for x in dangling_timers
+    assert not dangling_places, long_desc + '\n'.join(
+        _check_throttle_info(path) for path in dangling_places
     )
 
 
@@ -1036,8 +1227,16 @@ def _dangling_qanimations(monkeypatch, request):
     dangling_animations = []
 
     for animation, calling in animation_dkt.items():
-        if animation.state() == QPropertyAnimation.Running:
-            dangling_animations.append((animation, calling))
+        # Guard the state read, not just the `stop()` below: a flash animation
+        # that already finished has had its C++ object deleted by
+        # `remove_flash_animation`, and `state()` then raises RuntimeError.
+        # A deleted animation is by definition not still running. This only
+        # surfaced once `napari_builtins`' Qt tests started being checked -
+        # five of its `test_features_table` tests errored here, none of them
+        # actually leaking anything.
+        with suppress(RuntimeError):
+            if animation.state() == QPropertyAnimation.Running:
+                dangling_animations.append((animation, calling))
 
     for animation, _ in dangling_animations:
         with suppress(RuntimeError):
@@ -1149,17 +1348,69 @@ with contextlib.suppress(ImportError):
         )
 
 
-@pytest.fixture
-def _find_dangling_widgets(request, qtbot):
-    yield
+#: Widget classes the dangling-widget check must not fail on. Both are GL
+#: canvas widgets that show up as parentless top-levels without any napari
+#: code having constructed them; see the comment at the use site.
+_GL_WIDGET_EXEMPTIONS = frozenset({'CanvasBackendDesktop', 'QOpenGLWidget'})
 
+
+def _short_repr(obj: object, limit: int = 200) -> str:
+    """repr() an arbitrary gc referrer without risking a crash/huge dump."""
+    try:
+        text = repr(obj)
+    except Exception as e:  # noqa: BLE001
+        return f'<{type(obj)!r}, repr failed: {e!r}>'
+    return f'{type(obj)!r}: {text[:limit]}' + (
+        '...' if len(text) > limit else ''
+    )
+
+
+def _keys_holding(container: object, target: object) -> list:
+    """Names of the slots in `container` that refer to `target`, if any.
+
+    Only dicts, lists and tuples: those cover the containers that actually
+    show up here (a mock's `call_args`, a frame's locals, a registry) and are
+    cheap and safe to walk. Anything raising is simply not described.
+    """
+    try:
+        if isinstance(container, dict):
+            return [k for k, v in container.items() if v is target]
+        if isinstance(container, (list, tuple)):
+            return [i for i, v in enumerate(container) if v is target]
+    except Exception:  # noqa: BLE001 - diagnostics must not raise
+        pass
+    return []
+
+
+def _describe_dangling_widgets(request, creation_places) -> str:
+    """Return a description of leaked top-level widgets, or '' if there are none.
+
+    Every widget reference lives in *this* function's frame, and this function
+    has returned by the time `_find_dangling_widgets` raises - so none of them
+    can be reachable from the resulting exception's traceback. That matters:
+    the exception is retained for the whole session (pytest_pretty's
+    CustomTerminalReporter holds failure reports to build its final summary
+    table), so a frame in its traceback holding `QApplication.topLevelWidgets()`
+    pins every Qt top-level widget that existed at the first failure. Those
+    then show up as "dangling" in every later test in the worker, whether or
+    not that test leaked anything - see the CI failure that motivated this,
+    where four unrelated tests all reported the same _QtMainWindow.
+
+    Keep widget references out of `_find_dangling_widgets` itself rather than
+    clearing locals by hand there; a returned frame cannot be re-entered, so
+    this stays correct as the code changes.
+    """
     from qtpy.QtWidgets import QApplication
 
     from napari._qt.qt_main_window import _QtMainWindow
 
     top_level_widgets = QApplication.topLevelWidgets()
-
-    viewer_weak_set = getattr(request.node, '_viewer_weak_set', set())
+    # `make_napari_viewer` stashes a `WeakSet[Viewer]` here; the default covers
+    # tests that never asked for a viewer. Only ever tested for membership, so
+    # `Container` is all this needs to promise.
+    viewer_weak_set: Container[Any] = getattr(
+        request.node, '_viewer_weak_set', set()
+    )
 
     problematic_widgets = []
 
@@ -1178,23 +1429,151 @@ def _find_dangling_widgets(request, qtbot):
         if widget.objectName() == 'handled_widget':
             continue
 
-        if widget.__class__.__name__ == 'CanvasBackendDesktop':
-            # TODO: we don't understand why this class leaks in
+        if widget.__class__.__name__ in _GL_WIDGET_EXEMPTIONS:
+            # TODO: we don't understand why `CanvasBackendDesktop` leaks in
             #  napari/_tests/test_sys_info.py, so we make an exception
             #  here and we don't raise when this class leaks.
+            #
+            # `QOpenGLWidget` is the same shape one class further down -
+            # `CanvasBackendDesktop` subclasses it on PyQt5 - and was added on
+            # this evidence: it appeared once, as a bare parentless
+            # `PyQt5.QtWidgets.QOpenGLWidget`, against an unrelated test
+            # (`test_build_qmodel_menu`) in a re-run of a commit whose three
+            # previous runs of the same job were green. Crucially it had **no
+            # recorded creation place**, and `_WIDGET_CREATION_PLACES` covers
+            # every widget any Python constructor builds during a test - so no
+            # napari code built it, it came from the C++ side. PyQt6 puts
+            # `QOpenGLWidget` in `QtOpenGLWidgets`, so only the PyQt5 jobs can
+            # see this at all.
+            #
+            # Not reproducible locally (Linux + software GL); two hypotheses
+            # were tested and disproved - sip does not re-wrap a subclass as
+            # its base after the wrapper is dropped, and Qt5 creates no hidden
+            # global-share QOpenGLWidget on macOS. Left as an exemption rather
+            # than chased, because a widget with no Python constructor is by
+            # definition not a napari leak.
             continue
 
         problematic_widgets.append(widget)
 
-    if problematic_widgets:
-        text = '\n'.join(
+    if not problematic_widgets:
+        return ''
+
+    lines = []
+    for widget in problematic_widgets:
+        lines.append(
             f'Widget: {widget} of type {type(widget)} with name {widget.objectName()}'
-            for widget in problematic_widgets
         )
+        lines.append(
+            f'  created at: {creation_places.get(widget, "<unknown - built before any tracked test, or by a class whose __init__ is not patched>")}'
+        )
+        for ref in gc.get_referrers(widget):
+            if (
+                ref is problematic_widgets
+                or ref is top_level_widgets
+                # this function's own frame shows up while it is running
+                # (`widget` is one of its locals) - not signal
+                or type(ref).__name__ == 'frame'
+            ):
+                continue
+            lines.append(f'  referrer: {_short_repr(ref)}')
+            # A container's truncated repr often cuts off exactly the part
+            # that matters - which slot holds the widget. Name it. Seen on
+            # min_req, where a leaked FeaturesTable's only referrer was a
+            # dict whose repr was cut off before reaching the widget, leaving
+            # the holder unidentifiable from the log alone.
+            lines.extend(
+                f'    held at key: {key!r}'
+                for key in _keys_holding(ref, widget)
+            )
 
-        for widget in problematic_widgets:
-            widget.setObjectName('handled_widget')
+    for widget in problematic_widgets:
+        widget.setObjectName('handled_widget')
 
+    return '\n'.join(lines)
+
+
+#: Classes whose `__init__` is patched to record where a widget was built.
+#:
+#: `QWidget` alone is enough on PyQt and not on PySide, so patch the bases
+#: explicitly rather than rely on either. PyQt resolves a subclass's
+#: `__init__` through the MRO, so one patch on `QWidget` catches everything;
+#: Shiboken gives each class its own `__init__`, which ends the chain.
+#: Measured, patching only `QWidget`:
+#:
+#:   PyQt6 6.10.0    misses nothing
+#:   PySide6 6.10.3  misses QMainWindow, QDialog, QDockWidget, QLabel,
+#:                   QPushButton, and any subclass of those
+#:
+#: `_QtMainWindow` subclasses `QMainWindow`, so on PySide6 the tracker was
+#: blind to the widget it is most often asked about.
+_TRACKED_WIDGET_BASES = (
+    'QWidget',
+    'QMainWindow',
+    'QDialog',
+    'QDockWidget',
+    'QMenu',
+)
+
+
+#: Creation places, keyed weakly by widget and **shared across the session**.
+#:
+#: Deliberately not per-test. The widget this check reports is very often one
+#: an *earlier* test leaked - a failing test's retained traceback pins its
+#: widgets, and the next test is the one that notices - so a per-test record
+#: can only ever answer "constructed before this fixture was active", which is
+#: true and useless. Seen exactly that way on CI: a leaked `_QtMainWindow`
+#: reported against `test_restart`, built by the `test_screenshot_to_clipboard`
+#: that failed immediately before it. Weak keys, so nothing is retained.
+_WIDGET_CREATION_PLACES: WeakKeyDictionary = WeakKeyDictionary()
+
+
+@pytest.fixture
+def _find_dangling_widgets(request, qtbot, monkeypatch):
+    # `gc.get_referrers()` only walks one level, so a widget kept alive by an
+    # indirect referrer (e.g. captured in a mock's call args) can show up with
+    # no apparent referrer at all. Record where every widget was constructed
+    # as a fallback, mirroring how
+    # `_dangling_qthreads`/`_dangling_qtimers`/`_dangling_qthread_pool`
+    # already track their resource's calling place.
+    from qtpy import QtWidgets
+
+    creation_places = _WIDGET_CREATION_PLACES
+
+    def _tracking_init(klass, base_init):
+        def init_with_tracking(self, *args, **kwargs):
+            base_init(self, *args, **kwargs)
+            # Only the first (outermost) patched `__init__` to run records,
+            # so the place named is the one that built the concrete widget
+            # rather than a base class reached on the way down.
+            if self not in creation_places:
+                creation_places[self] = _get_calling_place()
+
+        return init_with_tracking
+
+    installed: list = []
+    for name in _TRACKED_WIDGET_BASES:
+        klass = getattr(QtWidgets, name)
+        current = klass.__init__
+        # Skip a class that already inherits a patch installed above, rather
+        # than wrapping the wrapper: the inner one would then record the outer
+        # one's frame in `conftest.py` instead of the line that built the
+        # widget. On PyQt every one of these resolves to
+        # `sip.simplewrapper.__init__`, so patching `QWidget` covers the whole
+        # hierarchy and the rest are skipped; on PySide each class has its own
+        # `__init__`, so each is patched exactly once.
+        if any(current is wrapper for wrapper in installed):
+            continue
+        wrapper = _tracking_init(klass, current)
+        installed.append(wrapper)
+        monkeypatch.setattr(klass, '__init__', wrapper)
+
+    yield
+
+    # No widget may be referenced from this frame: see
+    # `_describe_dangling_widgets` for why.
+    text = _describe_dangling_widgets(request, creation_places)
+    if text:
         raise RuntimeError(f'Found dangling widgets:\n{text}')
 
 
@@ -1221,8 +1600,12 @@ def _reset_colormaps(monkeypatch):
     colormap_utils.AVAILABLE_COLORMAPS.update(prev)
 
 
-def pytest_runtest_setup(item):
+def apply_leak_detection_fixtures(item):
     """Add Qt leak detection fixtures *only* in tests using the qapp fixture.
+
+    Called from the `pytest_runtest_setup` hookimpls at the bottom of this
+    file and in `napari_builtins/conftest.py`, so it covers both trees - see
+    `pytest_runtest_setup` below for why there are two.
 
     Because we have headless test suite that does not include Qt, we cannot
     simply use `@pytest.fixture(autouse=True)` on all our fixtures for
@@ -1255,6 +1638,28 @@ def pytest_runtest_setup(item):
                 '_dangling_qtimers',
             ]
         )
+
+
+def pytest_runtest_setup(item):
+    """Register the leak detectors for items under ``src/napari``.
+
+    Deliberately a thin delegation rather than the logic itself: a conftest
+    only applies to items below its own directory, so ``napari_builtins`` has
+    an identical pair of hooks in its own conftest, delegating to the same
+    helpers. The trees are disjoint, so pluggy never registers two
+    implementations for one item - which it would if a shared parent conftest
+    also defined them.
+    """
+    apply_leak_detection_fixtures(item)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    """See `pytest_runtest_setup` above; `tryfirst` is load-bearing.
+
+    It must run before pytest-qt's own teardown hookimpl pumps the event loop.
+    """
+    force_stop_pending_qt_resources(item)
 
 
 class NapariTerminalReporter(CustomTerminalReporter):

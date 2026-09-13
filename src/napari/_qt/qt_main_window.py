@@ -500,7 +500,7 @@ class _QtMainWindow(QMainWindow):
             self._quit_app = quit_app
             self._is_close_dialog[quit_app] = True
             # here we inform that confirmation dialog is not open
-            self._qt_viewer.dims.stop()
+            self._qt_viewer.dims._stop_before_destroy()
             return super().close()
         self._is_close_dialog[quit_app] = True
         return None
@@ -654,7 +654,7 @@ class _QtMainWindow(QMainWindow):
     def _stop_worker_threads(self) -> None:
         self.status_thread.close_terminate()
         self.status_thread.wait()
-        self._qt_viewer.dims.stop()
+        self._qt_viewer.dims._stop_before_destroy()
 
     def restart(self):
         """Restart the napari application in a detached process."""
@@ -879,7 +879,7 @@ class Window:
     def qt_viewer(self):
         warnings.warn(
             'Public access to Window.qt_viewer is deprecated and will be removed in\n'
-            'no earlier than v0.9.0. It is considered an "implementation detail" '
+            'no earlier than v0.10.0. It is considered an "implementation detail" '
             'of the napari\napplication, not part of the napari viewer model. If your use case\n'
             'requires access to qt_viewer, please open an issue to discuss.',
             category=FutureWarning,
@@ -1140,7 +1140,7 @@ class Window:
         area: str | None = None,
         allowed_areas: Sequence[str] | None = None,
         shortcut=_sentinel,
-        add_vertical_stretch=True,
+        add_vertical_stretch=False,
         tabify: bool = False,
         menu: QMenu | None = None,
     ):
@@ -1710,8 +1710,11 @@ class Window:
                 'canvas_only screenshots.'
             )
 
-        # Part 2: take the screenshot
+        # Part 2: take the screenshot, making sure first that what we are
+        # about to capture is current.
         if canvas_only:
+            # `QtViewer._screenshot` flushes pending slices itself - it has to,
+            # since `QtViewer.screenshot` is a separate public entry point.
             img = self._qt_viewer._screenshot(
                 flash=flash,
                 size=size,
@@ -1719,6 +1722,12 @@ class Window:
                 fit_to_data_extent=fit_to_data_extent,
             )
         else:
+            # `grab()` just reads whatever the widgets have already painted, so
+            # this branch has to flush for itself - it previously did not wait
+            # for slicing at all (napari/napari#8033). Deliberately inside the
+            # `else` rather than above the branch: there it made the canvas
+            # path flush twice, for a 10s worst-case timeout instead of 5s.
+            self._qt_viewer._flush_pending_slices()
             img = self._qt_window.grab().toImage()
             if flash:
                 add_flash_animation(self._qt_window)
@@ -1830,6 +1839,14 @@ class Window:
         image : array
             Numpy array of type ubyte and shape (h, w, 4). Index [0, 0] is the
             upper-left corner of the rendered region.
+
+        Raises
+        ------
+        TimeoutError
+            If async slicing is enabled and a pending slice does not arrive in
+            time. Waiting for it is what stops a stale frame being captured
+            (napari/napari#8033), so this is reported rather than silently
+            returning the previous slice.
         """
 
         img = QImg2array(self._screenshot(size, scale, flash, canvas_only))
@@ -1849,6 +1866,11 @@ class Window:
             If True, screenshot shows only the image display canvas, and
             if False include the napari viewer frame in the screenshot,
             By default, True.
+
+        Raises
+        ------
+        TimeoutError
+            See `screenshot`; this goes through the same capture path.
         """
         img = self._screenshot(flash=flash, canvas_only=canvas_only)
         QApplication.clipboard().setImage(img)

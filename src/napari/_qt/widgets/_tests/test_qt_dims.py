@@ -1,10 +1,12 @@
 import os
+import warnings
 from sys import platform
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 from qtpy.QtCore import Qt
+from qtpy.QtWidgets import QWidget
 
 from napari._qt.widgets.qt_dims import QtDims
 from napari.components import Dims
@@ -379,6 +381,13 @@ def test_play_button(qtbot, mock_qt_method_ctx, qt_dims):
 
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: qt_dims.is_playing)
+    # qt_dims.is_playing flips as soon as the animation thread clears its
+    # internal Event, which can happen before the thread's queued
+    # `started` signal is processed and updates the button's own
+    # `playing` property. _on_click() below checks that property, not
+    # is_playing, to decide whether a click means start or stop - wait
+    # for it directly so the next click isn't misread as another start.
+    qtbot.waitUntil(lambda: button.property('playing') == 'True')
 
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: not qt_dims.is_playing)
@@ -397,6 +406,107 @@ def test_play_button(qtbot, mock_qt_method_ctx, qt_dims):
     button.mode_combo.setCurrentText('once')
     assert slider.loop_mode == button.mode_combo.currentText() == 'once'
     qtbot.waitUntil(qt_dims._animation_thread.isFinished)
+
+
+@pytest.fixture
+def parented_qt_dims(qtbot) -> QtDims:
+    """A `QtDims` owned by a parent widget, as in a real viewer.
+
+    Tests that close the `QtDims` themselves cannot use the shared `qt_dims`
+    fixture: `QtDims.closeEvent` calls `self.deleteLater()`, so pytest-qt's
+    teardown sweep would then call `close()` on a deleted C++ object. Giving
+    it a parent (which is how `QtViewer` holds it) means pytest-qt closes the
+    parent instead, and the `QtDims` is never a top-level widget for the
+    dangling-widget check to trip over.
+    """
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    qt_dims = QtDims(Dims(ndim=3), parent=parent)
+    try:
+        yield qt_dims
+    finally:
+        # Safety net for a failure before the test's own close: a running
+        # animation thread must never outlive the test.
+        if qt_dims.is_playing:
+            qt_dims.stop()
+            qtbot.waitUntil(lambda: not qt_dims.is_playing)
+
+
+@pytest.mark.allow_animation_thread
+def test_close_joins_a_running_animation_thread(qtbot, parented_qt_dims):
+    """`closeEvent` must stop and join the animation thread before it lets
+    `deleteLater()` destroy it.
+
+    `_animation_thread` is a child of this widget, so the `deleteLater()` in
+    `closeEvent` destroys it too - and Qt aborts the process outright if a
+    running QThread is destroyed. That abort is not catchable, so this test
+    cannot assert on it; it asserts the precondition that prevents it, namely
+    that the thread is no longer running once `close()` returns.
+    """
+    qt_dims = parented_qt_dims
+    assert qt_dims.slider_widgets[0].loop_mode == 'loop'  # so it keeps going
+
+    qt_dims.play(0, fps=20)
+    qtbot.waitUntil(lambda: qt_dims.is_playing)
+    thread = qt_dims._animation_thread
+    assert thread.isRunning()
+
+    with warnings.catch_warnings():
+        # A bounded wait that times out warns; that would mean the join
+        # failed, and the assertion below is what reports it.
+        warnings.simplefilter('ignore', RuntimeWarning)
+        qt_dims.close()
+
+    assert not thread.isRunning(), (
+        'closeEvent left the animation thread running; the queued '
+        'deleteLater() would destroy it mid-run and abort the process'
+    )
+    assert not qt_dims.is_playing
+
+
+def test_close_does_not_join_when_no_animation_ran(qtbot, parented_qt_dims):
+    """The common case must not pay for the join above.
+
+    Every viewer close goes through here and the vast majority never played,
+    so `closeEvent` is guarded on `isRunning()`. Assert that guard holds by
+    checking `stop()` - whose wait is bounded at seconds - is never called.
+    """
+    qt_dims = parented_qt_dims
+    assert not qt_dims._animation_thread.isRunning()
+
+    stop_calls = []
+    original_stop = qt_dims.stop
+
+    def counting_stop():
+        stop_calls.append(True)
+        return original_stop()
+
+    qt_dims.stop = counting_stop
+    qt_dims.close()
+
+    assert stop_calls == []
+
+
+def test_stop_before_destroy_finishes_join_after_bounded_wait_times_out(
+    parented_qt_dims, monkeypatch, caplog
+):
+    """Destruction must not proceed after the bounded wait times out."""
+    qt_dims = parented_qt_dims
+    thread = qt_dims._animation_thread
+    waits = []
+
+    monkeypatch.setattr(thread, 'isRunning', lambda: True)
+    monkeypatch.setattr(qt_dims, 'stop', lambda: False)
+    monkeypatch.setattr(
+        thread, 'wait', lambda *args: waits.append(args) or True
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        qt_dims._stop_before_destroy()
+
+    assert waits == [()]
+    assert 'waited until it finished before closing' in caplog.text
 
 
 def test_play_popup_stays_open_on_enter(qtbot, qt_dims):

@@ -82,6 +82,25 @@ class HistogramModel(EventedModel):
     # runtime, so the annotation here is only for documentation and
     # readability; the true type is ``Image`` (enforced by __init__).
     _layer: Image | Surface = PrivateAttr()
+
+    # Thread ownership of the attributes below is not uniform, and getting it
+    # wrong is the easiest mistake to make against this class.
+    #
+    # ``compute`` and ``_compute_chunked_progressive`` are generators. When a
+    # view drives them through a ``GeneratorWorker`` their bodies run on the
+    # worker thread, so every attribute they assign - ``_bin_edges``,
+    # ``_counts``, ``_dirty``, ``_full_cache``, ``_computing``,
+    # ``_compute_generation`` - is written off the main thread, unsynchronised.
+    # (When they are iterated directly, as ``_mark_dirty`` and ``counts`` do,
+    # the writes are on the caller's thread instead.)
+    #
+    # Consequence for main-thread readers, tests very much included: none of
+    # those attributes tells you anything about the *progress* of a running
+    # worker. In particular ``_dirty`` is cleared at the end of the chunk loop,
+    # so "still dirty" is not a reliable way to observe "still computing" - a
+    # short compute can finish before the reading thread runs its next few
+    # bytecodes. Wait on the main-thread-owned flags below to learn that a
+    # worker has finished, and only then read the values it produced.
     _bin_edges: np.ndarray = PrivateAttr(
         default_factory=lambda: np.array([0.0, 1.0])
     )
@@ -89,9 +108,12 @@ class HistogramModel(EventedModel):
     _dirty: bool = PrivateAttr(default=True)
     _computing: bool = PrivateAttr(default=False)
     _compute_generation: int = PrivateAttr(default=0)
-    # Set True by the first main thread view that starts a background compute for this
-    # model, preventing a second competing worker. Distinct from _computing
-    # (set inside the worker thread) since scheduling is serialized on the main thread.
+    # Main-thread-owned. Set True by the first view that starts a background
+    # compute for this model, preventing a second competing worker, and cleared
+    # from the queued ``finished`` handler. Distinct from _computing (set inside
+    # the worker thread) since scheduling is serialized on the main thread,
+    # which is what makes this flag - together with the view's own
+    # ``_compute_worker`` - safe to poll for worker completion.
     _compute_scheduled: bool = PrivateAttr(default=False)
     _full_cache: tuple[np.ndarray, np.ndarray, bool] | None = PrivateAttr(
         default=None

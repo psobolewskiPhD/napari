@@ -1,5 +1,8 @@
+from contextlib import suppress
+
 import numpy as np
 import pytest
+from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from napari._tests.utils import skip_local_popups, skip_on_win_ci
 from napari.layers import Shapes
@@ -9,6 +12,12 @@ from napari.utils.interactions import (
     mouse_press_callbacks,
     mouse_release_callbacks,
 )
+
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
 
 
 @skip_on_win_ci
@@ -218,7 +227,7 @@ def test_changing_image_gamma(make_napari_viewer):
 
 @skip_on_win_ci
 @skip_local_popups
-def test_grid_mode(make_napari_viewer):
+def test_grid_mode(make_napari_viewer, qtbot):
     # CMYBGR is the default color order when adding multichannel images.
     # See `napari.layers.utils.stack_utils.split_channels`.
     color = [
@@ -241,8 +250,23 @@ def test_grid_mode(make_napari_viewer):
     assert viewer.canvas.grid.stride == 1
 
     # check screenshot
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
-    center = tuple(np.round(np.divide(screenshot.shape[:2], 2)).astype(int))
+    screenshot = None
+    center = None
+
+    # The poll's predicate must be the same one asserted below. A poll that
+    # accepts a nearly-right frame returns on it, and the stricter assertion
+    # then fails on exactly that frame - worse than not polling at all.
+    # `assert_almost_equal` on uint8 pixels means exact, so demand exact here.
+    def _screenshot_matches_last_layer():
+        nonlocal screenshot, center
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        center = tuple(
+            np.round(np.divide(screenshot.shape[:2], 2)).astype(int)
+        )
+        return np.array_equal(screenshot[center], color[-1])
+
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_screenshot_matches_last_layer, timeout=4000)
     np.testing.assert_almost_equal(screenshot[center], color[-1])
 
     # enter grid view
@@ -251,8 +275,6 @@ def test_grid_mode(make_napari_viewer):
     assert viewer.canvas.grid.actual_shape(viewer.layers) == (2, 3)
     assert viewer.canvas.grid.stride == 1
 
-    # check screenshot
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
     # sample 6 squares of the grid and check they have right colors
     pos = [
         (1 / 4, 1 / 6),
@@ -262,6 +284,27 @@ def test_grid_mode(make_napari_viewer):
         (3 / 4, 3 / 6),
         (3 / 4, 5 / 6),
     ]
+
+    # Exact, for the same reason as above: the loop below asserts exact.
+    def _grid_screenshot_matches():
+        nonlocal screenshot
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        return all(
+            np.array_equal(
+                screenshot[
+                    tuple(
+                        np.round(np.multiply(screenshot.shape[:2], p)).astype(
+                            int
+                        )
+                    )
+                ],
+                c,
+            )
+            for c, p in zip(color, pos, strict=False)
+        )
+
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_grid_screenshot_matches, timeout=4000)
     for c, p in zip(color, pos, strict=False):
         coord = tuple(
             np.round(np.multiply(screenshot.shape[:2], p)).astype(int)
@@ -468,7 +511,7 @@ def test_scale_bar_visible(make_napari_viewer):
 
 @skip_on_win_ci
 @skip_local_popups
-def test_screenshot_has_no_border(make_napari_viewer):
+def test_screenshot_has_no_border(make_napari_viewer, qtbot):
     """See https://github.com/napari/napari/issues/3357"""
     viewer = make_napari_viewer(show=True)
     image_data = np.ones((60, 80), dtype=np.float32)
@@ -476,9 +519,21 @@ def test_screenshot_has_no_border(make_napari_viewer):
     # Zoom in dramatically to make the screenshot all red.
     viewer.scene.camera.zoom = 1000
 
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = None
+    expected = None
 
-    expected = np.broadcast_to([255, 0, 0, 255], screenshot.shape)
+    def _screenshot_is_all_red():
+        nonlocal screenshot, expected
+        screenshot = viewer.screenshot(canvas_only=True, flash=False)
+        expected = np.broadcast_to([255, 0, 0, 255], screenshot.shape)
+        return np.array_equal(screenshot, expected)
+
+    # Same class of race as the grid-mode/blending-mode screenshots in this
+    # file: the zoom change needs time to propagate into the rendered scene
+    # under CPU contention, so poll instead of grabbing a single frame.
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_screenshot_is_all_red, timeout=4000)
+
     np.testing.assert_array_equal(screenshot, expected)
 
 
@@ -497,20 +552,24 @@ def test_blending_modes_with_canvas(make_napari_viewer):
     viewer.window._qt_viewer.canvas.size = shape
     viewer.scene.camera.zoom = 1
 
-    # check that additive behaves correctly with black canvas
+    # check that additive behaves correctly with black canvas.
+    # Every screenshot below passes size=shape so that screenshot() resizes the
+    # canvas through QtViewer.resize_canvas, which divides by devicePixelRatio;
+    # without it the returned array is in physical pixels and only matches
+    # `shape` on a standard-DPI display.
     img1_layer.blending = 'additive'
     img2_layer.blending = 'additive'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img1 + img2)
 
     # minimum should not result in black background if canvas is black
     img1_layer.blending = 'minimum'
     img2_layer.blending = 'minimum'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], np.minimum(img1, img2))
     # toggle visibility of bottom layer
     img1_layer.visible = False
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img2)
     # and canvas should not affect the above results
     viewer.window._qt_viewer.canvas.bgcolor = 'white'
@@ -519,17 +578,17 @@ def test_blending_modes_with_canvas(make_napari_viewer):
     img1_layer.visible = True
     img1_layer.blending = 'additive'
     img2_layer.blending = 'additive'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img1 + img2)
     # toggle visibility of bottom layer
     img1_layer.visible = False
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], img2)
     # minimum should always work with white canvas bgcolor
     img1_layer.visible = True
     img1_layer.blending = 'minimum'
     img2_layer.blending = 'minimum'
-    screenshot = viewer.screenshot(canvas_only=True, flash=False)
+    screenshot = viewer.screenshot(canvas_only=True, flash=False, size=shape)
     np.testing.assert_array_equal(screenshot[:, :, 0], np.minimum(img1, img2))
 
 

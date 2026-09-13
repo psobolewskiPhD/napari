@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import os
 import typing
+from contextlib import suppress
 from itertools import product, takewhile
 from math import isclose
 from unittest import mock
@@ -11,6 +12,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 from imageio import imread
+from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 from pytestqt.qtbot import QtBot
 from qtpy.QtCore import QEvent, QPointF
 from qtpy.QtGui import QEnterEvent
@@ -34,6 +36,7 @@ from napari.utils.colormaps import DirectLabelColormap, label_colormap
 from napari.utils.interactions import mouse_press_callbacks
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from numpy.typing import ArrayLike
@@ -673,6 +676,28 @@ def test_create_non_empty_viewer_model(qtbot: QtBot) -> None:
     gc.collect()
 
 
+@pytest.mark.allow_animation_thread
+def test_close_joins_dims_animation_thread(
+    qtbot: QtBot, qt_viewer: QtViewer
+) -> None:
+    """The real viewer teardown path must join its child animation thread."""
+    qt_viewer.viewer.dims.ndim = 3
+    qt_viewer.viewer.dims.set_range(0, (0, 10, 1))
+    qt_viewer.dims.play(0, fps=20)
+    qtbot.waitUntil(qt_viewer.dims._animation_thread.isRunning)
+    thread = qt_viewer.dims._animation_thread
+
+    # Exercise QtViewer's teardown boundary without deleting fixture-owned
+    # widgets that pytest-qt still needs to close during fixture teardown.
+    with (
+        mock.patch.object(qt_viewer.canvas, 'delete'),
+        mock.patch.object(qt_viewer.dockConsole, 'deleteLater'),
+    ):
+        qt_viewer.closeEvent(None)
+
+    assert not thread.isRunning()
+
+
 def test_qt_viewer_canvas_is_nested_in_main_widget(
     qt_viewer: QtViewer,
 ) -> None:
@@ -752,19 +777,97 @@ def _update_data(
     qtbot: QtBot,
     qt_viewer: QtViewer,
     dtype: np.dtype = np.uint64,
+    expected_middle_pixel: Sequence[int] | None = None,
+    atol: float = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Change layer data and return color of label and middle pixel of screenshot."""
+    """Change layer data and return color of label and middle pixel of screenshot.
+
+    Waits for the canvas to actually reflect the change before sampling it,
+    then returns the last observed pair for the caller to assert on.
+
+    By default the wait is for `QtColorBox.color` and the canvas' middle
+    pixel to agree, which is what most callers go on to assert. Pass
+    `expected_middle_pixel` for the cases where the two legitimately never
+    agree - a label whose colormap entry is transparent leaves the middle
+    pixel opaque black - so that the wait is for a condition that can
+    actually become true.
+
+    `atol` must match the tolerance the caller then asserts with. A poll that
+    is *looser* than the assertion is worse than no poll at all: it returns on
+    the first frame that is merely close, guaranteeing the assertion runs
+    against the worst frame that still satisfies the wait. The default of 0
+    demands exact agreement, which is what `npt.assert_almost_equal` on uint8
+    pixels needs; callers asserting `atol=1` pass `atol=1`.
+    """
     layer.data = np.full((2, 2), label, dtype=dtype)
     layer.selected_label = label
 
-    qtbot.wait(50)  # wait for .update() to be called on QtColorBox from Qt
+    colorbox = qt_viewer.controls.widgets[layer]._label_control.colorbox
+    captured = {}
 
-    color_box_color = qt_viewer.controls.widgets[
-        layer
-    ]._label_control.colorbox.color
-    screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
-    shape = np.array(screenshot.shape[:2])
-    middle_pixel = screenshot[tuple(shape // 2)]
+    def _canvas_caught_up() -> bool:
+        # colorbox.color is only ever set inside its paintEvent(); the
+        # layer-change signal handlers just call self.update(), which
+        # merely schedules a repaint on Qt's event queue rather than
+        # running paintEvent() synchronously. Force it directly instead
+        # of hoping the event queue delivers it.
+        colorbox.repaint()
+        screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
+        shape = np.array(screenshot.shape[:2])
+        captured['color_box_color'] = colorbox.color
+        captured['middle_pixel'] = screenshot[tuple(shape // 2)]
+        target = (
+            captured['color_box_color']
+            if expected_middle_pixel is None
+            else expected_middle_pixel
+        )
+        if target is None:
+            # `colorbox.color` is None until QtColorBox has painted a colour
+            # for the selected label, and `repaint()` above only guarantees
+            # that paintEvent *ran* - not that the layer had computed
+            # `_selected_color` by then. So None here is usually "not ready
+            # yet" and has to be retried; it is only permanent for a label
+            # that renders transparent, and those callers say what they
+            # expect via `expected_middle_pixel` instead.
+            return False
+        return np.allclose(target, captured['middle_pixel'], rtol=0, atol=atol)
+
+    # A fixed sleep here used to be enough for Qt to process the QtColorBox
+    # update and the canvas repaint before the screenshot, but under CPU
+    # contention (e.g. parallel xdist workers) that's no longer a safe
+    # assumption. Poll for the canvas to catch up instead.
+    #
+    # On a genuine mismatch this deliberately falls through to the caller's
+    # assertions rather than raising a bare timeout: `atol` is the caller's
+    # own tolerance (see above), so the poll's success condition is exactly
+    # the comparison the caller then makes on the same captured values. A
+    # timeout therefore always produces a real assertion failure naming both
+    # colours - never a silent pass, and never a pass on a frame the caller
+    # would have rejected.
+    #
+    # The timeout is generous because one iteration is expensive where it
+    # matters: on the macOS CI runner (software GL, four xdist workers) a
+    # single screenshot of this canvas costs seconds, so 4000ms allowed only
+    # about one attempt and a canvas needing a second turn would have failed
+    # falsely. Raising it costs nothing when the test passes, since the poll
+    # returns as soon as the condition holds; it only lengthens the failing
+    # path.
+    with suppress(QtBotTimeoutError):
+        qtbot.waitUntil(_canvas_caught_up, timeout=10000)
+
+    if captured['color_box_color'] is None and expected_middle_pixel is None:
+        # Diagnosed here rather than inside the poll: a None colour has to be
+        # retried while the poll is running, and is only worth reporting if it
+        # is still None once the poll has given up. Otherwise the caller would
+        # compare None against a pixel array and fail obscurely.
+        raise AssertionError(
+            f'QtColorBox never got a color for label {label}. If this label '
+            'renders transparent, pass `expected_middle_pixel` to say what '
+            'the canvas should show instead.'
+        )
+
+    color_box_color = captured['color_box_color']
+    middle_pixel = captured['middle_pixel']
 
     return color_box_color, middle_pixel
 
@@ -811,9 +914,11 @@ def test_label_colors_matching_widget_auto(
     for label in test_colors:
         # Change color & selected color to the same label
         color_box_color, middle_pixel = _update_data(
-            layer, label, qtbot, qt_viewer_with_controls, dtype
+            layer, label, qtbot, qt_viewer_with_controls, dtype, atol=1
         )
 
+        # atol matches the `atol=1` handed to _update_data: the poll waits for
+        # exactly the agreement asserted here, no looser.
         npt.assert_allclose(
             color_box_color, middle_pixel, atol=1, err_msg=f'label {label}'
         )
@@ -856,8 +961,16 @@ def test_label_colors_matching_widget_direct(
     )
     layer.show_selected_label = use_selection
 
+    # label 0 is 'transparent' in `color`, so the colorbox reads (0, 0, 0, 0)
+    # while the canvas shows opaque black - tell _update_data what to wait
+    # for, since the usual colorbox/pixel agreement can never happen here.
     color_box_color, middle_pixel = _update_data(
-        layer, 0, qtbot, qt_viewer_with_controls, dtype
+        layer,
+        0,
+        qtbot,
+        qt_viewer_with_controls,
+        dtype,
+        expected_middle_pixel=[0, 0, 0, 255],
     )
     assert np.allclose([0, 0, 0, 255], middle_pixel)
 

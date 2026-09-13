@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import dask.array as da
 import pytest
-from qtpy.QtCore import Qt, QThread
+from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import QPushButton, QWidget
 
 from napari._qt.dialogs.qt_notification import (
@@ -42,16 +42,19 @@ def _raise():
     raise ValueError('error!')
 
 
+class _WidgetWithResizeSignal(QWidget):
+    resized = Signal()
+
+
 @pytest.fixture
 def _clean_current(monkeypatch, qtbot):
     from napari._qt.qt_main_window import _QtMainWindow
 
     base_show = NapariQtNotification.show
 
-    widget = QWidget()
+    widget = _WidgetWithResizeSignal()
     qtbot.addWidget(widget)
     mock_window = MagicMock()
-    widget.resized = MagicMock()
     mock_window._qt_viewer.canvas.native = widget
 
     def mock_current_main_window(*_, **__):

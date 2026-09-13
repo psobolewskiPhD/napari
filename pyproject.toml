@@ -53,7 +53,14 @@ dependencies = [
     "napari-svg>=0.1.8",
     "npe2>=0.9.0",
     "numpy>=1.25",
-    "pandas>=1.5.0",
+    # 1.5.3, not 1.5.0: on 1.5.0 exactly, `test_features_tables_dtypes`
+    # leaves its `FeaturesTable` alive past teardown (the widget is C++-owned
+    # with an undelivered `DeferredDelete`), so the leak detector reports a
+    # dangling widget. Bisected against a fixed numpy 1.25.0 and reproduced on
+    # both PyQt5 and PyQt6; 1.5.3 is clean and still supports the numpy 1.25
+    # floor. Note this is *not* the `dayfirst` parsing warning, which 1.5.3
+    # still emits - that is handled by a `filterwarnings` mark on the test.
+    "pandas>=1.5.3",
     "Pillow>=10.0",
     "pint>=0.17",
     "platformdirs>=4.3.0",
@@ -155,12 +162,17 @@ testing = [
     "lxml[html_clean]>5",
     "matplotlib >= 3.6.1",
     "pooch>=1.6.0",
-    "coverage>7",
+    # >=7.10 for `[tool.coverage.run] patch`, which is what makes coverage
+    # work under xdist - see the comment there.
+    "coverage>=7.10",
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
-    "pytest>=8.3.5",
+    # >=9.0.0 for the `faulthandler_exit_on_timeout` ini option, which turns a
+    # hung test into a bounded, self-describing failure. See [tool.pytest.ini_options].
+    "pytest>=9.0.0",
     "pytest-rerunfailures>=15.1",
+    "pytest-xdist>=3.6.1",
     "tensorstore>=0.1.43",
     "virtualenv>=20.24.7",
     "xarray>=2023.5.0",
@@ -220,7 +232,7 @@ docs = [
     # triangle and bermuda needed for docs/guides/triangulation.md
     "triangle; python_version <= '3.13'",  # there is no wheel for triangle on python 3.14 at the time and build from source causes problems.
     "bermuda>=0.1.4",
-    "pytest",
+    "pytest>=9.0.0",  # see the note in the `testing` extra
     "linkify-it-py",
     "numba!=0.62.1,!=0.62.0",
 ]
@@ -245,12 +257,17 @@ testing = [
     "lxml[html_clean]>5",
     "matplotlib >= 3.6.1",
     "pooch>=1.6.0",
-    "coverage>7",
+    # >=7.10 for `[tool.coverage.run] patch`, which is what makes coverage
+    # work under xdist - see the comment there.
+    "coverage>=7.10",
     "pretend>=1.0.9",
     "pytest-qt >=4.4.0",
     "pytest-pretty>=1.1.0",
-    "pytest>=8.3.5",
+    # >=9.0.0 for the `faulthandler_exit_on_timeout` ini option, which turns a
+    # hung test into a bounded, self-describing failure. See [tool.pytest.ini_options].
+    "pytest>=9.0.0",
     "pytest-rerunfailures>=15.1",
+    "pytest-xdist>=3.6.1",
     "tensorstore>=0.1.43",
     "virtualenv>=20.24.7",
     "xarray>=2023.5.0",
@@ -310,7 +327,7 @@ docs = [
     # triangle and bermuda needed for docs/guides/triangulation.md
     "triangle; python_version <= '3.13'",  # there is no wheel for triangle on python 3.14 at the time and build from source causes problems.
     "bermuda>=0.1.4",
-    "pytest",
+    "pytest>=9.0.0",  # see the note in the `testing` extra
     "linkify-it-py",
     "numba!=0.62.1,!=0.62.0",
 ]
@@ -488,10 +505,45 @@ xarray = "xr"
 # https://docs.python.org/3/library/warnings.html#describing-warning-filters
 addopts = ["--maxfail=5",  "--durations=10",  "-ra", "--strict-markers", "--strict-config"]
 console_output_style = "count"
-minversion = "8"
+minversion = "9"
+
+# A hang is the one failure mode that reports nothing: no traceback, no diff,
+# just a progress line that stops moving.  Under xdist even the progress count
+# is aggregated across workers, so it cannot name the test that stopped.
+#
+# faulthandler_timeout dumps the stack of *every* thread - which is what you
+# need, since these hangs are threading bugs - and exit_on_timeout then kills
+# the worker, so xdist reports "worker gwN crashed while running <test>" and
+# reschedules the rest of the file instead of the job stalling to its
+# wall-clock limit.  A hang that happens only once is still reported as a
+# failure; the respawn does not paper over it.
+#
+# On the value: this has to clear the slowest *legitimate* test by a wide
+# margin, because a false positive here manufactures a new flake.  The slowest
+# tests are far slower than local runs suggest - on macos-15-intel py3.14
+# pyqt5, from the CI timing report:
+#
+#   121.7s  test_qt_viewer.py::test_label_colors_matching_widget_auto[int16-all]
+#   101.1s  test_vispy_labels_layer.py::test_labels_iso_gradient_modes
+#    99.4s  test_viewer_qt_integration.py::test_screenshot
+#
+# with a dozen tests over 50s.  600s leaves ~5x headroom over the observed
+# worst case while still catching a deadlock in a fraction of the job's
+# ~20 minute runtime.  Revisit if a legitimate test ever approaches it.
+#
+# NOTE: faulthandler_exit_on_timeout requires pytest >= 9.0.0, which is why the
+# `testing` extra pins that floor.  With --strict-config an older pytest fails
+# loudly on this key rather than silently ignoring it.
+faulthandler_timeout = 600
+faulthandler_exit_on_timeout = true
 # log_cli_level = "INFO"
 xfail_strict = true
-testpaths = ["napari", "napari_builtins"]
+# Relative to rootdir, so these have to include `src/` since the
+# src-layout move. When they do not resolve, pytest warns
+# ("No files were found in testpaths") and silently falls back to a
+# recursive search from the *current directory* - which collected the
+# same 5400 tests only because of where tox happens to invoke it.
+testpaths = ["src/napari", "src/napari_builtins"]
 #pythonpath = "src"
 
 
@@ -540,6 +592,7 @@ markers = [
     "slow: mark a test as slow",
     "key_bindings: Test of keybindings",
     "show_qt_viewer: Show the QtViewer in this Test",
+    "settle_canvas: Wait for the window manager to stop resizing the canvas before make_napari_viewer(show=True) returns. For tests that read canvas pixels; see _wait_for_canvas_settled.",
 ]
 
 [tool.mypy]
@@ -931,6 +984,21 @@ exclude_lines = [
 ]
 
 [tool.coverage.run]
+# xdist workers are separate processes spawned by execnet, and a parent's
+# tracer does not propagate into a child - so `coverage run -m pytest -n N`
+# measures only the controller. That is not a small loss: the controller does
+# collection-time imports and no test bodies, so the whole suite reports about
+# what a single test file does. `patch = subprocess` writes the .pth files and
+# sets the environment variables that start coverage inside each child before
+# it imports anything, which restores parity with a non-xdist run.
+#
+# Measured on one file, combined as CI does: no xdist gives 136 lines in the
+# test body and 143 in the module under test; `-n 4` without this gives 0 and
+# 108; `-n 4` with it gives 136 and 143.
+#
+# This measures *all* subprocesses, not only xdist workers, so a test that
+# shells out to Python now contributes coverage it did not before.
+patch = ["subprocess"]
 omit = [
     "*/_vendor/*",
     "*/_version.py",

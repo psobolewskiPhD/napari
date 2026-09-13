@@ -373,6 +373,8 @@ def test_magicgui_add_future_data(
 
 def test_magicgui_add_threadworker(qtbot, make_napari_viewer):
     """Test that annotating with FunctionWorker works."""
+    from qtpy.QtCore import QThreadPool
+
     from napari.qt.threading import FunctionWorker, thread_worker
 
     viewer = make_napari_viewer()
@@ -395,6 +397,10 @@ def test_magicgui_add_threadworker(qtbot, make_napari_viewer):
     # this is just to make testing with threads easier
     with qtbot.waitSignal(worker.finished):
         worker.start()
+    # `finished` fires just before the QRunnable's run() actually returns,
+    # so the QThreadPool's own bookkeeping (activeThreadCount) can lag
+    # behind it briefly - wait for the pool to genuinely go idle too.
+    QThreadPool.globalInstance().waitForDone(1000)
 
     assert len(viewer.layers) == 1
     assert isinstance(viewer.layers[0], Image)

@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -459,7 +461,9 @@ def test_qt_histogram_layer_bar_color(qtbot):
     widget.cleanup()
 
 
-def test_qt_histogram_mode_switch_uses_async_for_chunked_data(qtbot):
+def test_qt_histogram_mode_switch_uses_async_for_chunked_data(
+    qtbot, monkeypatch
+):
     """Switching to full mode on chunked data should use async compute,
     not block the main thread on synchronous chunk I/O.
 
@@ -477,35 +481,58 @@ def test_qt_histogram_mode_switch_uses_async_for_chunked_data(qtbot):
     layer = Image(data)
     layer.histogram.enabled = True
 
+    # Record which thread each chunk read happens on. The regression this
+    # test guards is *chunk I/O blocking the main thread*, so record that
+    # directly rather than inferring it from `_dirty`: the async worker
+    # clears `_dirty` from its own thread, so a fast worker can clear it
+    # before the main thread looks, and the old assertion then reported a
+    # synchronous compute when the compute had in fact correctly gone async.
+    main_thread = threading.get_ident()
+    chunk_load_threads: list[int] = []
+    real_load_chunk = HistogramModel._load_chunk
+
+    def recording_load_chunk(data, flat_idx):
+        chunk_load_threads.append(threading.get_ident())
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(recording_load_chunk)
+    )
+
     widget = QtHistogramWidget(layer)
     qtbot.addWidget(widget)
 
     # Initial state: model is clean from the canvas-mode compute that
-    # ran during __init__.
+    # ran during __init__, which does not touch chunks.
     assert not layer.histogram._dirty
+    assert chunk_load_threads == []
 
     # Switch to full mode.  In the buggy code this would trigger
     # _mark_dirty() → compute() → synchronous chunk iteration.
     layer.histogram.mode = 'full'
 
-    # After _mark_dirty() with the fix: _dirty should be True but
-    # compute() should NOT have been called (it was deferred for
-    # chunked data).  If _dirty is False here, compute() ran
-    # synchronously — the regression.
-    assert layer.histogram._dirty, (
-        '_mark_dirty() called compute() synchronously on mode switch '
-        'with chunked data — this would block the main thread'
+    # The regression: _mark_dirty() iterating compute() inline would have
+    # loaded chunks on this thread before the assignment returned.
+    assert main_thread not in chunk_load_threads, (
+        '_mark_dirty() called compute() synchronously on mode switch with '
+        'chunked data — this would block the main thread on chunk I/O'
     )
 
     # The widget should have started an async worker via
-    # _on_model_mode_change() → _ensure_histogram_computed().
-    # For small in-memory dask arrays the worker may already have
-    # finished, but if it's still running or just-completed we
-    # verify that the async path was taken by waiting for results.
+    # _on_model_mode_change() → _ensure_histogram_computed(). `_compute_worker`
+    # is only ever written on the main thread (set here, cleared from the
+    # queued `finished` handler), and we have not re-entered the event loop,
+    # so this cannot race with the worker.
+    assert widget._compute_worker is not None
+
     qtbot.waitUntil(
         lambda: not layer.histogram._dirty,
         timeout=30000,
     )
+
+    # Non-vacuous: chunks really were read, and never on the main thread.
+    assert chunk_load_threads
+    assert main_thread not in chunk_load_threads
 
     # Verify valid histogram results from the async path
     assert len(layer.histogram._bin_edges) == 257
@@ -525,7 +552,7 @@ def _full_data_counts(base, hist, clims_range):
     return ground_truth.astype(np.int64)
 
 
-def test_two_views_share_single_worker_and_both_animate(qtbot):
+def test_two_views_share_single_worker_and_both_animate(qtbot, monkeypatch):
     """Two histogram views on one layer (inline + popup) share a single
     compute worker, yet *both* animate progressively — regardless of which
     view owns the worker.
@@ -566,16 +593,95 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
     view_b.histogram_visual.set_data = count_b
 
     hist = layer.histogram
+
+    # Gate every chunk load, so the worker cannot outrun the main thread.
+    #
+    # A draw count taken from an ungated worker is not merely late but
+    # *lossy*: `_on_partial_histogram` returns early when
+    # `_histogram._dirty` is False, and finishing the compute clears
+    # `_dirty`, so a backlog of queued partials is discarded rather than
+    # delayed. Measured by blocking the main thread for 1.5s while the worker
+    # ran, draws went from {'a': 64, 'b': 64} to {'a': 1, 'b': 1} - and with
+    # the two views starting at different times, to {'a': 1, 'b': 2}. That is
+    # how a plain `draws > 1` failed on macOS CI, and no timeout recovers a
+    # dropped signal.
+    #
+    # So don't observe the animation, *drive* it: release one chunk at a time
+    # and wait for both views to redraw before releasing the next. "Both views
+    # animate progressively" then becomes an enforced sequence with an exact
+    # expected draw count, rather than a race with a weakened assertion.
+    permits = threading.Semaphore(0)
+    entered_first_load = threading.Event()
+    ungated_loads: list[int] = []
+    real_load_chunk = HistogramModel._load_chunk
+
+    def gated_load_chunk(data, flat_idx):
+        entered_first_load.set()
+        # A timeout rather than a bare wait, so a regression that loads more
+        # chunks than this test released fails the test instead of hanging
+        # the suite.
+        if not permits.acquire(timeout=30):
+            ungated_loads.append(int(flat_idx))
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(gated_load_chunk)
+    )
+
     layer.histogram.enabled = True  # triggers the shared async compute
+
+    # The worker is now parked in its first gated chunk load, so no partial
+    # can have been emitted yet. Baseline the counters here and compare
+    # deltas: that isolates partial-driven redraws from any draw the
+    # `enabled` change itself caused, and from the two views having been
+    # constructed at different times.
+    qtbot.waitUntil(entered_first_load.is_set, timeout=15000)
+    baseline = dict(draws)
+
+    n_gated = 3
+    for expected in range(1, n_gated + 1):
+        permits.release()
+
+        # The assertions live *inside* the callback so pytest-qt chains them
+        # as the cause of its own TimeoutError: a view that stops animating
+        # then reports which view stalled and after how many chunks, rather
+        # than a bare 'waitUntil timed out'.
+        def _both_views_redrew(expected=expected):
+            assert draws['a'] - baseline['a'] >= expected, (
+                f'view_a stopped animating at chunk {expected}: '
+                f'{draws} from {baseline}'
+            )
+            assert draws['b'] - baseline['b'] >= expected, (
+                f'view_b stopped animating at chunk {expected}: '
+                f'{draws} from {baseline}'
+            )
+
+        qtbot.waitUntil(_both_views_redrew, timeout=15000)
+
+    # Each released chunk yields exactly one partial, which the owning view
+    # writes into the shared model and broadcasts, redrawing *both* views
+    # exactly once. Equal, progressive, and not just non-blank.
+    assert draws['a'] - baseline['a'] == n_gated, (
+        f'view_a did not animate once per chunk: {draws} from {baseline}'
+    )
+    assert draws['b'] - baseline['b'] == n_gated, (
+        f'view_b did not animate once per chunk: {draws} from {baseline}'
+    )
+
+    # Let every remaining chunk through so the compute finishes. Derived from
+    # the array rather than hard-coded, and any spare permits are simply never
+    # acquired - while a compute that wants *more* chunk loads than the array
+    # has is recorded in `ungated_loads` and asserted on below.
+    permits.release(layer.data.npartitions)
 
     qtbot.waitUntil(
         lambda: not hist._compute_scheduled and not hist._dirty,
         timeout=15000,
     )
 
-    # Both views animated progressively from the single worker's chunks.
-    assert draws['a'] > 1
-    assert draws['b'] > 1
+    assert not ungated_loads, (
+        f'chunks were loaded without waiting for a permit: {ungated_loads}'
+    )
     # Single-worker invariant held to completion — nothing left dangling.
     assert not hist._compute_scheduled
     assert view_a._compute_worker is None
@@ -596,12 +702,15 @@ def test_two_views_share_single_worker_and_both_animate(qtbot):
     )
 
 
-def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
-    """Closing the view that owns the in-flight worker nudges a surviving
-    view to finish the compute, instead of stranding it with partial data.
+def test_partial_histogram_broadcasts_to_all_views(qtbot):
+    """A partial result from one view's worker redraws *every* view.
 
-    Covers closing the contrast-limits popup mid-load while the inline
-    histogram remains open.
+    Narrower than `test_two_views_share_single_worker_and_both_animate`, and
+    complementary to it: that test drives the same broadcast through the real
+    `GeneratorWorker` (gating its chunk loads so the sequence is enforced),
+    while this one calls `_on_partial_histogram` directly. So it still covers
+    the broadcast if the worker plumbing changes shape, with no threading
+    involved at all.
     """
     dask = pytest.importorskip('dask.array')
     base = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
@@ -613,17 +722,97 @@ def test_closing_owning_view_mid_compute_hands_off_to_survivor(qtbot):
     qtbot.addWidget(view_a)
     qtbot.addWidget(view_b)
 
+    draws = {'a': 0, 'b': 0}
+    for key, view in (('a', view_a), ('b', view_b)):
+        orig = view.histogram_visual.set_data
+
+        def count(*args, _key=key, _orig=orig, **kwargs):
+            draws[_key] += 1
+            return _orig(*args, **kwargs)
+
+        view.histogram_visual.set_data = count
+
+    hist = layer.histogram
+    # `_on_partial_histogram` is a no-op unless a compute is outstanding
+    hist._dirty = True
+
+    n_partials = 3
+    for i in range(1, n_partials + 1):
+        counts = np.full(hist.bins, i, dtype=np.int64)
+        bin_edges = np.linspace(0, 1, hist.bins + 1)
+        view_a._on_partial_histogram((bin_edges, counts))
+
+    assert draws == {'a': n_partials, 'b': n_partials}, (
+        'each partial from one view must redraw both views once'
+    )
+
+    view_a.cleanup()
+    view_b.cleanup()
+
+
+def test_closing_owning_view_mid_compute_hands_off_to_survivor(
+    qtbot, monkeypatch
+):
+    """Closing the view that owns the in-flight worker nudges a surviving
+    view to finish the compute, instead of stranding it with partial data.
+
+    Covers closing the contrast-limits popup mid-load while the inline
+    histogram remains open.
+    """
+    dask = pytest.importorskip('dask.array')
+    base = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
+    layer = Image(dask.from_array(base, chunks=(32, 32)))
+    layer.histogram.mode = 'full'
+
+    # Park the worker inside its first chunk load so the compute is
+    # *guaranteed* unfinished when the owning view closes.
+    #
+    # "Still computing" is not a state the main thread can assert, only one it
+    # can enforce: `_compute_chunked_progressive` clears `_dirty` from the
+    # worker thread, and these 64 chunks of 1024 elements are ~1ms of numpy
+    # (which drops the GIL), so losing the GIL for a single switch interval
+    # after `worker.start()` is enough for the whole compute to land first.
+    # Asserting `_dirty` unguarded raced against that and failed on CI.
+    #
+    # Blocking in `_load_chunk` also exercises the mid-chunk branch that
+    # `QtHistogramWidget.cleanup` documents but nothing else reaches: the
+    # generator is stopped while stuck on a chunk read rather than between
+    # iterations.
+    entered_chunk_load = threading.Event()
+    release_chunk_load = threading.Event()
+    real_load_chunk = HistogramModel._load_chunk
+
+    def gated_load_chunk(data, flat_idx):
+        entered_chunk_load.set()
+        # A timeout rather than a bare wait, so a regression that never
+        # releases the worker fails the test instead of hanging the suite.
+        release_chunk_load.wait(timeout=30)
+        return real_load_chunk(data, flat_idx)
+
+    monkeypatch.setattr(
+        HistogramModel, '_load_chunk', staticmethod(gated_load_chunk)
+    )
+
+    view_a = QtHistogramWidget(layer)
+    view_b = QtHistogramWidget(layer)
+    qtbot.addWidget(view_a)
+    qtbot.addWidget(view_b)
+
     hist = layer.histogram
     layer.histogram.enabled = True  # starts the shared worker synchronously
 
     # Identify the owning view and close it before the compute finishes.
+    assert entered_chunk_load.wait(timeout=10), (
+        'worker never reached _load_chunk'
+    )
     assert hist._compute_scheduled
     if view_a._compute_worker is not None:
         owner, survivor = view_a, view_b
     else:
         owner, survivor = view_b, view_a
-    assert hist._dirty  # compute has not completed yet
+    assert hist._dirty  # compute is parked in _load_chunk, so cannot be done
     owner.cleanup()
+    release_chunk_load.set()
 
     # The survivor must take over and finish the compute correctly.
     qtbot.waitUntil(

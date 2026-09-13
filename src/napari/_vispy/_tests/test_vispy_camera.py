@@ -3,6 +3,12 @@ import sys
 import numpy as np
 import pytest
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 def test_camera(make_napari_viewer):
     """Test vispy camera creation in 2D."""
@@ -264,11 +270,33 @@ def test_camera_orientation_3d(make_napari_viewer, qtbot):
     # directions
 
     viewer.scene.camera.perspective = 60
-    viewer.scene.camera.orientation = ('away', 'down', 'right')
-    qtbot.wait(50)
-    sshot_away = viewer.screenshot(canvas_only=True, flash=False)[..., 0]
-    viewer.scene.camera.orientation = ('towards', 'down', 'right')
-    qtbot.wait(50)
-    sshot_towards = viewer.screenshot(canvas_only=True, flash=False)[..., 0]
+
+    captured = {}
+
+    def _pair_captured_at_one_size() -> bool:
+        viewer.scene.camera.orientation = ('away', 'down', 'right')
+        captured['away'] = viewer.screenshot(canvas_only=True, flash=False)[
+            ..., 0
+        ]
+        viewer.scene.camera.orientation = ('towards', 'down', 'right')
+        captured['towards'] = viewer.screenshot(canvas_only=True, flash=False)[
+            ..., 0
+        ]
+        return captured['away'].shape == captured['towards'].shape
+
+    # These are whole-canvas means, so they scale with how much black
+    # background surrounds the volume - which makes them comparable only if
+    # both frames were rendered into the same canvas. The window manager can
+    # resize the canvas at any moment, and on CI it does so late and by a lot
+    # (see the 376px mismatch behind `_capture_pair_agrees` in
+    # `_qt/_tests/test_viewer_qt_integration.py::test_screenshot`). A resize
+    # landing between these two captures inverts the comparison outright:
+    # measured locally, away@(800, 1000)=170.83 against towards@(1100,
+    # 1400)=104.46, which is the shape of the CI failure this replaced
+    # (towards=77.16 < away=105.76). Capture the pair and retry if the canvas
+    # moved underneath us, rather than trying to predict when it will stop.
+    qtbot.waitUntil(_pair_captured_at_one_size, timeout=5000)
+    sshot_away = captured['away']
+    sshot_towards = captured['towards']
 
     assert np.mean(sshot_towards) > np.mean(sshot_away)
