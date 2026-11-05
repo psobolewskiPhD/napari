@@ -76,11 +76,14 @@ jobs:
           for i in $(seq 1 "$ITERATIONS"); do
             echo "::group::iteration $i"
             set +e
-            # shellcheck disable=SC2086 # EXTRA_ENV is a list of VAR=value words
-            # shellcheck disable=SC2086 # TEST_PATH/PYTEST_ARGS are word lists
+            # EXTRA_ENV, TEST_PATH and PYTEST_ARGS are deliberately word-split.
+            # addopts is reset because disabling rerunfailures unregisters its
+            # `flaky` marker, which --strict-markers (from addopts) rejects.
+            # shellcheck disable=SC2086
             env $EXTRA_ENV python -m pytest $TEST_PATH $PYTEST_ARGS \
               -k "$SELECTION" \
-              --maxfail=1000 -p no:rerunfailures -q -p no:cacheprovider \
+              -o addopts= --maxfail=1000 --durations=10 \
+              -p no:rerunfailures -q -p no:cacheprovider \
               > "diag/iter_$i.log" 2>&1
             code=$?
             set -e
