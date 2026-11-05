@@ -918,6 +918,78 @@ def _diag_grab(qt_viewer: QtViewer) -> tuple[np.ndarray, int]:
     return shot, len(draws)
 
 
+def _diag_textures(qt_viewer, layer) -> dict:
+    """Read the label data and colour LUT textures back from GL.
+
+    Compared with napari's CPU-side arrays, this tells a corrupt or missing
+    upload apart from correct textures that are sampled wrongly.
+    """
+    from OpenGL import GL
+
+    vis = qt_viewer.canvas.layer_to_visual[layer]
+    node = vis.node
+    qt_viewer.canvas.native.makeCurrent()
+    objects = qt_viewer.canvas._scene_canvas.context.shared.parser._objects
+    out = {'gl_error_before': int(GL.glGetError())}
+    view = np.asarray(layer._slice.image.view)
+    value = int(view.flat[0])
+    textures = {
+        'data': node._texture,
+        'lut': node.shared_program['texture2D_values'],
+    }
+    for name, tex in textures.items():
+        info = {
+            'shape': list(getattr(tex, 'shape', ())),
+            'format': getattr(tex, 'format', None),
+            'internalformat': getattr(tex, 'internalformat', None),
+        }
+        glo = objects.get(getattr(tex, 'id', None))
+        handle = getattr(glo, 'handle', None)
+        info['handle'] = handle
+        if handle is None or handle < 0:
+            out[name] = info
+            continue
+        GL.glBindTexture(GL.GL_TEXTURE_2D, handle)
+        w = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_WIDTH
+        )
+        h = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_HEIGHT
+        )
+        ifmt = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_INTERNAL_FORMAT
+        )
+        info['gl_size'] = [int(w), int(h)]
+        info['gl_internal_format'] = hex(int(ifmt))
+        raw = GL.glGetTexImage(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, GL.GL_FLOAT)
+        gl_arr = np.asarray(raw, dtype=np.float32).reshape(int(h), int(w), 4)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        if name == 'data':
+            info['gl_unique_r'] = np.unique(gl_arr[..., 0]).tolist()[:5]
+            info['expected_r'] = (
+                value / 65535 if view.dtype.itemsize == 2 else value / 255
+            )
+        else:
+            cpu = np.asarray(
+                getattr(vis, 'texture_data', None), dtype=np.float32
+            )
+            row, col = (
+                divmod(value, 256) if view.dtype.itemsize == 2 else (value, 0)
+            )
+            info['lut_index'] = [row, col]
+            info['gl_entry'] = gl_arr[row, col].round(4).tolist()
+            if cpu.shape == gl_arr.shape:
+                diff = np.abs(cpu - gl_arr).max(axis=-1)
+                info['cpu_entry'] = cpu[row, col].round(4).tolist()
+                info['n_texels_differ'] = int((diff > 1e-3).sum())
+                info['max_diff'] = float(diff.max())
+            else:
+                info['cpu_shape'] = list(cpu.shape)
+        out[name] = info
+    out['gl_error_after'] = int(GL.glGetError())
+    return out
+
+
 def _middle(shot: np.ndarray) -> np.ndarray:
     return shot[tuple(np.array(shot.shape[:2]) // 2)]
 
@@ -987,6 +1059,10 @@ def _diag_record(
         'node_visible': bool(node.visible),
         'node_data': None if node_data is None else _uniq(node_data),
     }
+    try:
+        rec['textures'] = _diag_textures(qt_viewer, layer)
+    except Exception as e:  # noqa: BLE001 - diagnostics must not mask the failure
+        rec['textures'] = f'{type(e).__name__}: {e}'
 
     # same state, re-rendered with no event processing in between
     now, rec['now_draws'] = _diag_grab(qt_viewer)

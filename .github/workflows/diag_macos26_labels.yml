@@ -19,30 +19,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # the 14 label tests in fresh processes (crashed 10/10 previously)
-          - variant: baseline
-            selection: "label_colors_matching_widget"
-          # same, but never show the separate layer-controls window
-          - variant: no_controls
-            selection: "label_colors_matching_widget"
-            no_controls: "1"
-          # same, but Fusion instead of the native macOS style
-          - variant: fusion
+          # Fusion avoids the AppKit/Metal crash (0/6 vs 6/6 native), so every
+          # iteration reaches the label tests; mismatches read GL textures back
+          - variant: fusion_readback
             selection: "label_colors_matching_widget"
             style: "Fusion"
-          # same, with Reduce Transparency (fewer Liquid Glass effects)
-          - variant: reduce_transparency
-            selection: "label_colors_matching_widget"
-          # whole test_qt_viewer.py, so the label tests run in a warm process
-          - variant: warm
-            selection: ""
     env:
       NAPARI_DIAG_LABELS: ${{ github.workspace }}/diag/diag.jsonl
       NAPARI_DIAG_NO_CONTROLS: ${{ matrix.no_controls }}
       QT_STYLE_OVERRIDE: ${{ matrix.style }}
       VARIANT: ${{ matrix.variant }}
       SELECTION: ${{ matrix.selection }}
-      ITERATIONS: "6"
+      ITERATIONS: "8"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,6 +103,8 @@ jobs:
           print('draw events per grab (ok / mismatch):',
                 dict(collections.Counter(r['n_draws'] for r in grabs if r['ok'])),
                 dict(collections.Counter(r['n_draws'] for r in grabs if not r['ok'])), '\n')
+          for r in bad:
+              print(f"- {r['test'].split('::')[-1]} label {r['label']}: {json.dumps(r.get('textures'))}")
           if bad:
               print('| test | label | expected | middle | all bg | all black | draws | slice | node vis | node data | now ok | wait ok |')
               print('|---|---|---|---|---|---|---|---|---|---|---|---|')
