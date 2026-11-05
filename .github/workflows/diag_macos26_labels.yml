@@ -19,24 +19,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Black frames came with NaN in napari's CPU-side colour LUT, which
-          # numpy cannot produce: hunt the stray write. PYTHONMALLOC=malloc so
-          # Python objects are guarded too, not hidden in pymalloc arenas.
-          # Guard Malloc: overruns and use-after-free fault at the writer
-          - variant: gmalloc
+          # Experiment 3: make the vispy canvas a native child window, so the
+          # top-level flushes as raster and only the canvas window uses the
+          # GL RHI flush (where Guard Malloc caught Apple's glClear overrun)
+          # Does Guard Malloc still fault? Painting log shows who flushes via RHI.
+          - variant: native_gmalloc
             selection: "label_colors_matching_widget and 16"
             style: "Fusion"
-            extra_env: "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib PYTHONMALLOC=malloc"
-          # Guard Malloc guarding the start of blocks (underruns)
-          - variant: gmalloc_before
-            selection: "label_colors_matching_widget and 16"
-            style: "Fusion"
-            extra_env: "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 PYTHONMALLOC=malloc"
-          # libmalloc's own checks, in case DYLD_ injection is stripped
-          - variant: malloc_scribble
-            selection: "label_colors_matching_widget and 16"
-            style: "Fusion"
-            extra_env: "MallocScribble=1 MallocGuardEdges=1 MallocCheckHeapStart=1000 MallocCheckHeapEach=1000 MallocCheckHeapAbort=1 PYTHONMALLOC=malloc"
+            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1 DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib PYTHONMALLOC=malloc QT_LOGGING_RULES=qt.widgets.painting.debug=true PYTEST_ADDOPTS=-s"
+            iterations: "4"
+          # native style, label tests in fresh processes (baseline was 6/6 segfault)
+          - variant: native_baseline
+            selection: "label_colors_matching_widget"
+            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1"
+            iterations: "6"
+          # native style, whole test_qt_viewer.py (warm was 1/6 segfault, 16 black)
+          - variant: native_warm
+            selection: ""
+            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1"
+            iterations: "4"
     env:
       NAPARI_DIAG_LABELS: ${{ github.workspace }}/diag/diag.jsonl
       NAPARI_DIAG_NO_CONTROLS: ${{ matrix.no_controls }}
@@ -44,7 +45,7 @@ jobs:
       VARIANT: ${{ matrix.variant }}
       SELECTION: ${{ matrix.selection }}
       EXTRA_ENV: ${{ matrix.extra_env }}
-      ITERATIONS: "4"
+      ITERATIONS: ${{ matrix.iterations }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,6 +98,12 @@ jobs:
           print(f"## {os.environ['VARIANT']}\n")
           logs = ''.join(open(f).read() for f in glob.glob('diag/iter_*.log'))
           print('GuardMalloc active:', 'GuardMalloc[' in logs, '\n')
+          flushes = collections.Counter(
+              (m.group(1), bool(m.group(2)))
+              for m in re.finditer(r'Flushing .*? of (\w+)\(.*?\) to \w+\(.*?\)( using RHI)?\s*$', logs, re.M)
+          )
+          for (cls, rhi), n in sorted(flushes.items()):
+              print(f"- flush {cls}: {'RHI' if rhi else 'raster'} x{n}")
           for line in open('diag/exits.txt'):
               print('-', line.strip())
           print()
