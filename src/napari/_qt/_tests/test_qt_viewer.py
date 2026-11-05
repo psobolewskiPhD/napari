@@ -885,6 +885,132 @@ def test_create_non_empty_viewer_model_initializes_world_units(
     )
 
 
+# DIAGNOSTIC (macos-26 black label frames): set NAPARI_DIAG_LABELS to a
+# .jsonl path to log every grab and probe each mismatch. Not for merging.
+_DIAG_PATH = os.environ.get('NAPARI_DIAG_LABELS')
+# grey canvas: an empty, never-drawn FBO reads back black, a drawn one grey
+_DIAG_BG = np.array([51, 51, 51, 255])
+_diag_state = {'gl_logged': False, 'saved': 0}
+
+
+def _diag_write(record: dict) -> None:
+    import json
+
+    with open(_DIAG_PATH, 'a') as f:
+        f.write(json.dumps(record, default=str) + '\n')
+
+
+def _diag_grab(qt_viewer: QtViewer) -> tuple[np.ndarray, int]:
+    """Screenshot, counting vispy draw events (paintGL calls) during it."""
+    draws = []
+
+    def count(event):
+        draws.append(1)
+
+    events = qt_viewer.canvas._scene_canvas.events
+    events.draw.connect(count)
+    try:
+        shot = qt_viewer.screenshot(flash=False, size=[400, 400])
+    finally:
+        events.draw.disconnect(count)
+    return shot, len(draws)
+
+
+def _middle(shot: np.ndarray) -> np.ndarray:
+    return shot[tuple(np.array(shot.shape[:2]) // 2)]
+
+
+def _uniq(arr, n=5) -> list:
+    return np.unique(np.asarray(arr)).tolist()[:n]
+
+
+def _diag_record(
+    layer, label, qtbot, qt_viewer, color_box_color, shot, n_draws
+):
+    test = os.environ.get('PYTEST_CURRENT_TEST', '').split(' ')[0]
+    if not _diag_state['gl_logged']:
+        from vispy.gloo import gl
+
+        qt_viewer.canvas.native.makeCurrent()
+        _diag_write(
+            {
+                'event': 'gl',
+                'renderer': gl.glGetParameter(gl.GL_RENDERER),
+                'version': gl.glGetParameter(gl.GL_VERSION),
+            }
+        )
+        _diag_state['gl_logged'] = True
+
+    expected = _DIAG_BG if label == 0 else np.asarray(color_box_color)
+    middle = _middle(shot)
+    ok = np.abs(expected.astype(int) - middle.astype(int)).max() <= 1
+    _diag_write(
+        {
+            'event': 'grab',
+            'test': test,
+            'label': int(label),
+            'ok': bool(ok),
+            'n_draws': n_draws,
+        }
+    )
+    if ok:
+        return
+
+    # state at the moment of failure, before anything re-renders
+    node = qt_viewer.canvas.layer_to_visual[layer].node
+    node_data = getattr(node, '_data', None)
+    cols, counts = np.unique(shot.reshape(-1, 4), axis=0, return_counts=True)
+    top = np.argsort(counts)[::-1][:5]
+    rec = {
+        'event': 'mismatch',
+        'test': test,
+        'label': int(label),
+        'expected': expected.tolist(),
+        'middle': middle.tolist(),
+        'n_draws': n_draws,
+        'shot_shape': list(shot.shape),
+        'widget_size': [
+            qt_viewer.canvas.native.width(),
+            qt_viewer.canvas.native.height(),
+        ],
+        'dpr': qt_viewer.canvas.native.devicePixelRatioF(),
+        'frame_top_colors': [[cols[i].tolist(), int(counts[i])] for i in top],
+        'frame_all_bg': bool((shot == _DIAG_BG).all()),
+        'frame_all_black': bool((shot[..., :3] == 0).all()),
+        'layer_data': _uniq(layer.data),
+        'selected_label': int(layer.selected_label),
+        'slice_empty': bool(layer._slice.empty),
+        'slice_raw': _uniq(layer._slice.image.raw),
+        'slice_view': _uniq(layer._slice.image.view),
+        'node_visible': bool(node.visible),
+        'node_data': None if node_data is None else _uniq(node_data),
+    }
+
+    # same state, re-rendered with no event processing in between
+    now, rec['now_draws'] = _diag_grab(qt_viewer)
+    rec['now_middle'] = _middle(now).tolist()
+    rec['now_ok'] = bool(
+        np.abs(expected.astype(int) - _middle(now).astype(int)).max() <= 1
+    )
+
+    # after letting the event loop run
+    qtbot.wait(200)
+    later, rec['wait_draws'] = _diag_grab(qt_viewer)
+    rec['wait_middle'] = _middle(later).tolist()
+    rec['wait_ok'] = bool(
+        np.abs(expected.astype(int) - _middle(later).astype(int)).max() <= 1
+    )
+    _diag_write(rec)
+
+    if _diag_state['saved'] < 30:
+        _diag_state['saved'] += 1
+        out = os.path.join(
+            os.path.dirname(_DIAG_PATH),
+            f'mismatch_{os.getpid()}_{_diag_state["saved"]}.npz',
+        )
+        np.savez_compressed(out, first=shot, now=now, wait=later)
+
+
 def _update_data(
     layer: Labels,
     label: int,
@@ -901,7 +1027,19 @@ def _update_data(
     color_box_color = qt_viewer.controls.widgets[
         layer
     ]._label_control.colorbox.color
-    screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
+    if _DIAG_PATH:
+        screenshot, n_draws = _diag_grab(qt_viewer)
+        _diag_record(
+            layer,
+            label,
+            qtbot,
+            qt_viewer,
+            color_box_color,
+            screenshot,
+            n_draws,
+        )
+    else:
+        screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
     shape = np.array(screenshot.shape[:2])
     middle_pixel = screenshot[tuple(shape // 2)]
 
@@ -910,6 +1048,13 @@ def _update_data(
 
 @pytest.fixture
 def qt_viewer_with_controls(qt_viewer: QtViewer) -> QtViewer:
+    if _DIAG_PATH:
+        qt_viewer.viewer.canvas.background_color_override = (
+            0.2,
+            0.2,
+            0.2,
+            1.0,
+        )
     qt_viewer.controls.show()
     return qt_viewer
 
@@ -998,7 +1143,10 @@ def test_label_colors_matching_widget_direct(
     color_box_color, middle_pixel = _update_data(
         layer, 0, qtbot, qt_viewer_with_controls, dtype
     )
-    assert np.allclose([0, 0, 0, 255], middle_pixel)
+    if _DIAG_PATH:
+        assert np.allclose(_DIAG_BG, middle_pixel, atol=1)
+    else:
+        assert np.allclose([0, 0, 0, 255], middle_pixel)
 
     for label in test_colors:
         # Change color & selected color to the same label
