@@ -1,5 +1,6 @@
-# DIAGNOSTIC ONLY (fork PR #76): classify the black label-screenshot frames
-# on macos-26 runners. See _update_data in src/napari/_qt/_tests/test_qt_viewer.py.
+# DIAGNOSTIC ONLY (fork PR #76): bisect the macos-26 system-UI segfault and
+# classify black label-screenshot frames. See _update_data in
+# src/napari/_qt/_tests/test_qt_viewer.py.
 name: DIAG macos-26 label frames
 
 on:
@@ -11,12 +12,37 @@ permissions:
 
 jobs:
   diag:
-    name: diag macos-latest label frames
+    name: diag ${{ matrix.variant }}
     runs-on: macos-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the 14 label tests in fresh processes (crashed 10/10 previously)
+          - variant: baseline
+            selection: "label_colors_matching_widget"
+          # same, but never show the separate layer-controls window
+          - variant: no_controls
+            selection: "label_colors_matching_widget"
+            no_controls: "1"
+          # same, but Fusion instead of the native macOS style
+          - variant: fusion
+            selection: "label_colors_matching_widget"
+            style: "Fusion"
+          # same, with Reduce Transparency (fewer Liquid Glass effects)
+          - variant: reduce_transparency
+            selection: "label_colors_matching_widget"
+          # whole test_qt_viewer.py, so the label tests run in a warm process
+          - variant: warm
+            selection: ""
     env:
       NAPARI_DIAG_LABELS: ${{ github.workspace }}/diag/diag.jsonl
-      ITERATIONS: "10"
+      NAPARI_DIAG_NO_CONTROLS: ${{ matrix.no_controls }}
+      QT_STYLE_OVERRIDE: ${{ matrix.style }}
+      VARIANT: ${{ matrix.variant }}
+      SELECTION: ${{ matrix.selection }}
+      ITERATIONS: "6"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,15 +59,28 @@ jobs:
           python -c "from qtpy import QT_VERSION; print('Qt', QT_VERSION)"
           sw_vers
 
-      - name: Run label colour tests repeatedly
+      - name: Reduce transparency
+        if: matrix.variant == 'reduce_transparency'
+        run: |
+          defaults write com.apple.universalaccess reduceTransparency -bool true \
+            || sudo defaults write com.apple.universalaccess reduceTransparency -bool true \
+            || echo "could not set reduceTransparency"
+          defaults read com.apple.universalaccess reduceTransparency || true
+
+      - name: Run tests repeatedly, one fresh process each
         run: |
           mkdir -p diag
           for i in $(seq 1 "$ITERATIONS"); do
             echo "::group::iteration $i"
+            set +e
             python -m pytest src/napari/_qt/_tests/test_qt_viewer.py \
-              -k "label_colors_matching_widget" \
+              -k "$SELECTION" \
               --maxfail=1000 -p no:rerunfailures -q -p no:cacheprovider \
-              || echo "iteration $i: pytest exit $?" | tee -a diag/exits.txt
+              > "diag/iter_$i.log" 2>&1
+            code=$?
+            set -e
+            tail -n 60 "diag/iter_$i.log"
+            echo "iteration $i exit $code" | tee -a diag/exits.txt
             echo "::endgroup::"
           done
 
@@ -49,22 +88,36 @@ jobs:
         if: always()
         run: |
           python - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
-          import collections, json, os
+          import collections, glob, json, os, re
+          print(f"## {os.environ['VARIANT']}\n")
+          for line in open('diag/exits.txt'):
+              print('-', line.strip())
+          print()
+          for log in sorted(glob.glob('diag/iter_*.log')):
+              text = open(log).read()
+              for block in text.split("Current thread's C stack")[1:]:
+                  frames = re.findall(r'Binary file "([^"]+)", at (\S+)', block)
+                  if len(frames) > 4:
+                      lib, sym = frames[4]
+                      print(f"- {log}: crash in {lib.rsplit('/', 1)[-1]} {sym[:60]}")
+              m = re.search(r'(\d+) failed', text)
+              if m:
+                  print(f'- {log}: {m.group(0)}')
           path = os.environ['NAPARI_DIAG_LABELS']
           if not os.path.exists(path):
-              print('no diag file'); raise SystemExit
+              print('\nno diag file'); raise SystemExit
           rs = [json.loads(line) for line in open(path)]
           gl = [r for r in rs if r['event'] == 'gl']
           grabs = [r for r in rs if r['event'] == 'grab']
           bad = [r for r in rs if r['event'] == 'mismatch']
-          print('## macos-26 label frame diagnostics\n')
-          print(f"GL: {gl[0] if gl else 'n/a'}\n")
+          print(f"\nGL: {gl[0] if gl else 'n/a'}\n")
           print(f'grabs: {len(grabs)}, mismatches: {len(bad)}\n')
           print('draw events per grab (ok / mismatch):',
                 dict(collections.Counter(r['n_draws'] for r in grabs if r['ok'])),
                 dict(collections.Counter(r['n_draws'] for r in grabs if not r['ok'])), '\n')
-          print('| test | label | expected | middle | all bg | all black | draws | slice | node vis | node data | now ok | wait ok |')
-          print('|---|---|---|---|---|---|---|---|---|---|---|---|')
+          if bad:
+              print('| test | label | expected | middle | all bg | all black | draws | slice | node vis | node data | now ok | wait ok |')
+              print('|---|---|---|---|---|---|---|---|---|---|---|---|')
           for r in bad:
               t = r['test'].split('::')[-1]
               print(f"| {t} | {r['label']} | {r['expected']} | {r['middle']} | {r['frame_all_bg']} | "
@@ -76,5 +129,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: diag-macos26-labels
+          name: diag-macos26-${{ matrix.variant }}
           path: diag

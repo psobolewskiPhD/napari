@@ -888,6 +888,8 @@ def test_create_non_empty_viewer_model_initializes_world_units(
 # DIAGNOSTIC (macos-26 black label frames): set NAPARI_DIAG_LABELS to a
 # .jsonl path to log every grab and probe each mismatch. Not for merging.
 _DIAG_PATH = os.environ.get('NAPARI_DIAG_LABELS')
+# variant: never show the controls window; expected colour from the layer
+_DIAG_NO_CONTROLS = os.environ.get('NAPARI_DIAG_NO_CONTROLS') == '1'
 # grey canvas: an empty, never-drawn FBO reads back black, a drawn one grey
 _DIAG_BG = np.array([51, 51, 51, 255])
 _diag_state = {'gl_logged': False, 'saved': 0}
@@ -1024,9 +1026,15 @@ def _update_data(
 
     qtbot.wait(50)  # wait for .update() to be called on QtColorBox from Qt
 
-    color_box_color = qt_viewer.controls.widgets[
-        layer
-    ]._label_control.colorbox.color
+    if _DIAG_NO_CONTROLS:
+        sel = layer._selected_color
+        color_box_color = (
+            None if sel is None else tuple(np.round(255 * sel).astype(int))
+        )
+    else:
+        color_box_color = qt_viewer.controls.widgets[
+            layer
+        ]._label_control.colorbox.color
     if _DIAG_PATH:
         screenshot, n_draws = _diag_grab(qt_viewer)
         _diag_record(
@@ -1055,7 +1063,8 @@ def qt_viewer_with_controls(qt_viewer: QtViewer) -> QtViewer:
             0.2,
             1.0,
         )
-    qt_viewer.controls.show()
+    if not _DIAG_NO_CONTROLS:
+        qt_viewer.controls.show()
     return qt_viewer
 
 
