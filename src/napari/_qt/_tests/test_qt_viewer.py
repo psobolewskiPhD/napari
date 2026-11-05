@@ -978,6 +978,31 @@ def _diag_textures(qt_viewer, layer) -> dict:
             )
             info['lut_index'] = [row, col]
             info['gl_entry'] = gl_arr[row, col].round(4).tolist()
+            for tag, arr in (('cpu', cpu), ('gl', gl_arr)):
+                nan = np.isnan(arr).any(axis=-1) if arr.ndim == 3 else None
+                if nan is not None and nan.any():
+                    where = np.argwhere(nan)
+                    info[f'{tag}_nan_texels'] = int(nan.sum())
+                    info[f'{tag}_nan_first'] = where[:4].tolist()
+                    info[f'{tag}_nan_bits'] = [
+                        hex(int(b))
+                        for b in arr[tuple(where[0])].view(np.uint32)
+                    ]
+            # a cache corrupted after it was built differs from a rebuild
+            try:
+                cmap = layer.colormap
+                dtype = layer._slice.image.raw.dtype
+                fresh = cmap._map_without_cache(
+                    np.arange(65536, dtype=np.uint16).astype(dtype)
+                ).reshape(256, -1, 4)
+                if fresh.shape == cpu.shape:
+                    bad = ~np.isclose(fresh, cpu, equal_nan=False).all(axis=-1)
+                    info['cache_vs_rebuild_differ'] = int(bad.sum())
+                    info['cache_vs_rebuild_first'] = np.argwhere(bad)[
+                        :4
+                    ].tolist()
+            except Exception as e:  # noqa: BLE001
+                info['cache_vs_rebuild'] = f'{type(e).__name__}: {e}'
             if cpu.shape == gl_arr.shape:
                 diff = np.abs(cpu - gl_arr).max(axis=-1)
                 info['cpu_entry'] = cpu[row, col].round(4).tolist()

@@ -19,18 +19,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Fusion avoids the AppKit/Metal crash (0/6 vs 6/6 native), so every
-          # iteration reaches the label tests; mismatches read GL textures back
-          - variant: fusion_readback
-            selection: "label_colors_matching_widget"
+          # Black frames came with NaN in napari's CPU-side colour LUT, which
+          # numpy cannot produce: hunt the stray write. PYTHONMALLOC=malloc so
+          # Python objects are guarded too, not hidden in pymalloc arenas.
+          # Guard Malloc: overruns and use-after-free fault at the writer
+          - variant: gmalloc
+            selection: "label_colors_matching_widget and 16"
             style: "Fusion"
+            extra_env: "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib PYTHONMALLOC=malloc"
+          # Guard Malloc guarding the start of blocks (underruns)
+          - variant: gmalloc_before
+            selection: "label_colors_matching_widget and 16"
+            style: "Fusion"
+            extra_env: "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 PYTHONMALLOC=malloc"
+          # libmalloc's own checks, in case DYLD_ injection is stripped
+          - variant: malloc_scribble
+            selection: "label_colors_matching_widget and 16"
+            style: "Fusion"
+            extra_env: "MallocScribble=1 MallocGuardEdges=1 MallocCheckHeapStart=1000 MallocCheckHeapEach=1000 MallocCheckHeapAbort=1 PYTHONMALLOC=malloc"
     env:
       NAPARI_DIAG_LABELS: ${{ github.workspace }}/diag/diag.jsonl
       NAPARI_DIAG_NO_CONTROLS: ${{ matrix.no_controls }}
       QT_STYLE_OVERRIDE: ${{ matrix.style }}
       VARIANT: ${{ matrix.variant }}
       SELECTION: ${{ matrix.selection }}
-      ITERATIONS: "8"
+      EXTRA_ENV: ${{ matrix.extra_env }}
+      ITERATIONS: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,10 +72,13 @@ jobs:
       - name: Run tests repeatedly, one fresh process each
         run: |
           mkdir -p diag
+          py=$(python -c "import sys; print(sys.executable)")
+          codesign -d --entitlements - "$(realpath "$py")" 2>&1 | tee diag/entitlements.txt || true
           for i in $(seq 1 "$ITERATIONS"); do
             echo "::group::iteration $i"
             set +e
-            python -m pytest src/napari/_qt/_tests/test_qt_viewer.py \
+            # shellcheck disable=SC2086 # EXTRA_ENV is a list of VAR=value words
+            env $EXTRA_ENV python -m pytest src/napari/_qt/_tests/test_qt_viewer.py \
               -k "$SELECTION" \
               --maxfail=1000 -p no:rerunfailures -q -p no:cacheprovider \
               > "diag/iter_$i.log" 2>&1
@@ -78,6 +95,8 @@ jobs:
           python - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
           import collections, glob, json, os, re
           print(f"## {os.environ['VARIANT']}\n")
+          logs = ''.join(open(f).read() for f in glob.glob('diag/iter_*.log'))
+          print('GuardMalloc active:', 'GuardMalloc[' in logs, '\n')
           for line in open('diag/exits.txt'):
               print('-', line.strip())
           print()
@@ -86,8 +105,9 @@ jobs:
               for block in text.split("Current thread's C stack")[1:]:
                   frames = re.findall(r'Binary file "([^"]+)", at (\S+)', block)
                   if len(frames) > 4:
-                      lib, sym = frames[4]
-                      print(f"- {log}: crash in {lib.rsplit('/', 1)[-1]} {sym[:60]}")
+                      print(f"- {log}: native crash stack:")
+                      for lib, sym in frames[4:16]:
+                          print(f"    - {lib.rsplit('/', 1)[-1]} {sym[:90]}")
               m = re.search(r'(\d+) failed', text)
               if m:
                   print(f'- {log}: {m.group(0)}')
