@@ -14,36 +14,34 @@ jobs:
   diag:
     name: diag ${{ matrix.variant }}
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Experiment 3: make the vispy canvas a native child window, so the
-          # top-level flushes as raster and only the canvas window uses the
-          # GL RHI flush (where Guard Malloc caught Apple's glClear overrun)
-          # Does Guard Malloc still fault? Painting log shows who flushes via RHI.
-          - variant: native_gmalloc
-            selection: "label_colors_matching_widget and 16"
-            style: "Fusion"
-            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1 DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib PYTHONMALLOC=malloc QT_LOGGING_RULES=qt.widgets.painting.debug=true PYTEST_ADDOPTS=-s"
-            iterations: "4"
-          # native style, label tests in fresh processes (baseline was 6/6 segfault)
-          - variant: native_baseline
-            selection: "label_colors_matching_widget"
-            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1"
-            iterations: "6"
-          # native style, whole test_qt_viewer.py (warm was 1/6 segfault, 16 black)
-          - variant: native_warm
+          # Experiment 3 held for test_qt_viewer.py (native canvas: 0 black
+          # frames, 0 segfaults). Now the whole suite, native macOS style,
+          # twice in parallel; every normal-canvas Qt 6.12 full run failed.
+          - variant: full_native_a
+            test_path: ""
             selection: ""
+            pytest_args: "--ignore tools --import-mode=importlib -o faulthandler_timeout=900"
             extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1"
-            iterations: "4"
+            iterations: "1"
+          - variant: full_native_b
+            test_path: ""
+            selection: ""
+            pytest_args: "--ignore tools --import-mode=importlib -o faulthandler_timeout=900"
+            extra_env: "NAPARI_DIAG_NATIVE_CANVAS=1"
+            iterations: "1"
     env:
       NAPARI_DIAG_LABELS: ${{ github.workspace }}/diag/diag.jsonl
       NAPARI_DIAG_NO_CONTROLS: ${{ matrix.no_controls }}
       QT_STYLE_OVERRIDE: ${{ matrix.style }}
       VARIANT: ${{ matrix.variant }}
       SELECTION: ${{ matrix.selection }}
+      TEST_PATH: ${{ matrix.test_path }}
+      PYTEST_ARGS: ${{ matrix.pytest_args }}
       EXTRA_ENV: ${{ matrix.extra_env }}
       ITERATIONS: ${{ matrix.iterations }}
     steps:
@@ -58,7 +56,7 @@ jobs:
       - name: Install napari (same pins as the tox jobs)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -c resources/constraints/constraints_py3.14.txt -e ".[pyqt6]" --group testing
+          python -m pip install -c resources/constraints/constraints_py3.14.txt -e ".[pyqt6,optional-numba]" --group testing
           python -c "from qtpy import QT_VERSION; print('Qt', QT_VERSION)"
           sw_vers
 
@@ -79,7 +77,8 @@ jobs:
             echo "::group::iteration $i"
             set +e
             # shellcheck disable=SC2086 # EXTRA_ENV is a list of VAR=value words
-            env $EXTRA_ENV python -m pytest src/napari/_qt/_tests/test_qt_viewer.py \
+            # shellcheck disable=SC2086 # TEST_PATH/PYTEST_ARGS are word lists
+            env $EXTRA_ENV python -m pytest $TEST_PATH $PYTEST_ARGS \
               -k "$SELECTION" \
               --maxfail=1000 -p no:rerunfailures -q -p no:cacheprovider \
               > "diag/iter_$i.log" 2>&1
@@ -118,6 +117,13 @@ jobs:
               m = re.search(r'(\d+) failed', text)
               if m:
                   print(f'- {log}: {m.group(0)}')
+              for t in sorted(set(re.findall(r'^(src/\S+\.py):\d+ (test_\S+)', text, re.M))):
+                  print(f'    - FAILED {t[0]}::{t[1]}')
+              m = re.search(r'Results \(([\d.]+)s\):((?:\n\s+\d+ \w+)+)', text)
+              if m:
+                  print(f"    - results ({m.group(1)} s): {' '.join(m.group(2).split())}")
+              if 'Timeout (0:' in text or 'faulthandler_timeout' in text and 'most recent call first' in text:
+                  print('    - faulthandler timeout dump present (hang)')
           path = os.environ['NAPARI_DIAG_LABELS']
           if not os.path.exists(path):
               print('\nno diag file'); raise SystemExit
