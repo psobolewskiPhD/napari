@@ -885,6 +885,235 @@ def test_create_non_empty_viewer_model_initializes_world_units(
     )
 
 
+# DIAGNOSTIC (macos-26 black label frames): set NAPARI_DIAG_LABELS to a
+# .jsonl path to log every grab and probe each mismatch. Not for merging.
+_DIAG_PATH = os.environ.get('NAPARI_DIAG_LABELS')
+# variant: never show the controls window; expected colour from the layer
+_DIAG_NO_CONTROLS = os.environ.get('NAPARI_DIAG_NO_CONTROLS') == '1'
+# grey canvas: an empty, never-drawn FBO reads back black, a drawn one grey
+_DIAG_BG = np.array([51, 51, 51, 255])
+_diag_state = {'gl_logged': False, 'saved': 0}
+
+
+def _diag_write(record: dict) -> None:
+    import json
+
+    with open(_DIAG_PATH, 'a') as f:
+        f.write(json.dumps(record, default=str) + '\n')
+
+
+def _diag_grab(qt_viewer: QtViewer) -> tuple[np.ndarray, int]:
+    """Screenshot, counting vispy draw events (paintGL calls) during it."""
+    draws = []
+
+    def count(event):
+        draws.append(1)
+
+    events = qt_viewer.canvas._scene_canvas.events
+    events.draw.connect(count)
+    try:
+        shot = qt_viewer.screenshot(flash=False, size=[400, 400])
+    finally:
+        events.draw.disconnect(count)
+    return shot, len(draws)
+
+
+def _diag_textures(qt_viewer, layer) -> dict:
+    """Read the label data and colour LUT textures back from GL.
+
+    Compared with napari's CPU-side arrays, this tells a corrupt or missing
+    upload apart from correct textures that are sampled wrongly.
+    """
+    from OpenGL import GL
+
+    vis = qt_viewer.canvas.layer_to_visual[layer]
+    node = vis.node
+    qt_viewer.canvas.native.makeCurrent()
+    objects = qt_viewer.canvas._scene_canvas.context.shared.parser._objects
+    out = {'gl_error_before': int(GL.glGetError())}
+    view = np.asarray(layer._slice.image.view)
+    value = int(view.flat[0])
+    textures = {
+        'data': node._texture,
+        'lut': node.shared_program['texture2D_values'],
+    }
+    for name, tex in textures.items():
+        info = {
+            'shape': list(getattr(tex, 'shape', ())),
+            'format': getattr(tex, 'format', None),
+            'internalformat': getattr(tex, 'internalformat', None),
+        }
+        glo = objects.get(getattr(tex, 'id', None))
+        handle = getattr(glo, 'handle', None)
+        info['handle'] = handle
+        if handle is None or handle < 0:
+            out[name] = info
+            continue
+        GL.glBindTexture(GL.GL_TEXTURE_2D, handle)
+        w = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_WIDTH
+        )
+        h = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_HEIGHT
+        )
+        ifmt = GL.glGetTexLevelParameteriv(
+            GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_INTERNAL_FORMAT
+        )
+        info['gl_size'] = [int(w), int(h)]
+        info['gl_internal_format'] = hex(int(ifmt))
+        raw = GL.glGetTexImage(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, GL.GL_FLOAT)
+        gl_arr = np.asarray(raw, dtype=np.float32).reshape(int(h), int(w), 4)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        if name == 'data':
+            info['gl_unique_r'] = np.unique(gl_arr[..., 0]).tolist()[:5]
+            info['expected_r'] = (
+                value / 65535 if view.dtype.itemsize == 2 else value / 255
+            )
+        else:
+            cpu = np.asarray(
+                getattr(vis, 'texture_data', None), dtype=np.float32
+            )
+            row, col = (
+                divmod(value, 256) if view.dtype.itemsize == 2 else (value, 0)
+            )
+            info['lut_index'] = [row, col]
+            info['gl_entry'] = gl_arr[row, col].round(4).tolist()
+            for tag, arr in (('cpu', cpu), ('gl', gl_arr)):
+                nan = np.isnan(arr).any(axis=-1) if arr.ndim == 3 else None
+                if nan is not None and nan.any():
+                    where = np.argwhere(nan)
+                    info[f'{tag}_nan_texels'] = int(nan.sum())
+                    info[f'{tag}_nan_first'] = where[:4].tolist()
+                    info[f'{tag}_nan_bits'] = [
+                        hex(int(b))
+                        for b in arr[tuple(where[0])].view(np.uint32)
+                    ]
+            # a cache corrupted after it was built differs from a rebuild
+            try:
+                cmap = layer.colormap
+                dtype = layer._slice.image.raw.dtype
+                fresh = cmap._map_without_cache(
+                    np.arange(65536, dtype=np.uint16).astype(dtype)
+                ).reshape(256, -1, 4)
+                if fresh.shape == cpu.shape:
+                    bad = ~np.isclose(fresh, cpu, equal_nan=False).all(axis=-1)
+                    info['cache_vs_rebuild_differ'] = int(bad.sum())
+                    info['cache_vs_rebuild_first'] = np.argwhere(bad)[
+                        :4
+                    ].tolist()
+            except Exception as e:  # noqa: BLE001
+                info['cache_vs_rebuild'] = f'{type(e).__name__}: {e}'
+            if cpu.shape == gl_arr.shape:
+                diff = np.abs(cpu - gl_arr).max(axis=-1)
+                info['cpu_entry'] = cpu[row, col].round(4).tolist()
+                info['n_texels_differ'] = int((diff > 1e-3).sum())
+                info['max_diff'] = float(diff.max())
+            else:
+                info['cpu_shape'] = list(cpu.shape)
+        out[name] = info
+    out['gl_error_after'] = int(GL.glGetError())
+    return out
+
+
+def _middle(shot: np.ndarray) -> np.ndarray:
+    return shot[tuple(np.array(shot.shape[:2]) // 2)]
+
+
+def _uniq(arr, n=5) -> list:
+    return np.unique(np.asarray(arr)).tolist()[:n]
+
+
+def _diag_record(
+    layer, label, qtbot, qt_viewer, color_box_color, shot, n_draws
+):
+    test = os.environ.get('PYTEST_CURRENT_TEST', '').split(' ')[0]
+    if not _diag_state['gl_logged']:
+        from vispy.gloo import gl
+
+        qt_viewer.canvas.native.makeCurrent()
+        _diag_write(
+            {
+                'event': 'gl',
+                'renderer': gl.glGetParameter(gl.GL_RENDERER),
+                'version': gl.glGetParameter(gl.GL_VERSION),
+            }
+        )
+        _diag_state['gl_logged'] = True
+
+    expected = _DIAG_BG if label == 0 else np.asarray(color_box_color)
+    middle = _middle(shot)
+    ok = np.abs(expected.astype(int) - middle.astype(int)).max() <= 1
+    _diag_write(
+        {
+            'event': 'grab',
+            'test': test,
+            'label': int(label),
+            'ok': bool(ok),
+            'n_draws': n_draws,
+        }
+    )
+    if ok:
+        return
+
+    # state at the moment of failure, before anything re-renders
+    node = qt_viewer.canvas.layer_to_visual[layer].node
+    node_data = getattr(node, '_data', None)
+    cols, counts = np.unique(shot.reshape(-1, 4), axis=0, return_counts=True)
+    top = np.argsort(counts)[::-1][:5]
+    rec = {
+        'event': 'mismatch',
+        'test': test,
+        'label': int(label),
+        'expected': expected.tolist(),
+        'middle': middle.tolist(),
+        'n_draws': n_draws,
+        'shot_shape': list(shot.shape),
+        'widget_size': [
+            qt_viewer.canvas.native.width(),
+            qt_viewer.canvas.native.height(),
+        ],
+        'dpr': qt_viewer.canvas.native.devicePixelRatioF(),
+        'frame_top_colors': [[cols[i].tolist(), int(counts[i])] for i in top],
+        'frame_all_bg': bool((shot == _DIAG_BG).all()),
+        'frame_all_black': bool((shot[..., :3] == 0).all()),
+        'layer_data': _uniq(layer.data),
+        'selected_label': int(layer.selected_label),
+        'slice_empty': bool(layer._slice.empty),
+        'slice_raw': _uniq(layer._slice.image.raw),
+        'slice_view': _uniq(layer._slice.image.view),
+        'node_visible': bool(node.visible),
+        'node_data': None if node_data is None else _uniq(node_data),
+    }
+    try:
+        rec['textures'] = _diag_textures(qt_viewer, layer)
+    except Exception as e:  # noqa: BLE001 - diagnostics must not mask the failure
+        rec['textures'] = f'{type(e).__name__}: {e}'
+
+    # same state, re-rendered with no event processing in between
+    now, rec['now_draws'] = _diag_grab(qt_viewer)
+    rec['now_middle'] = _middle(now).tolist()
+    rec['now_ok'] = bool(
+        np.abs(expected.astype(int) - _middle(now).astype(int)).max() <= 1
+    )
+
+    # after letting the event loop run
+    qtbot.wait(200)
+    later, rec['wait_draws'] = _diag_grab(qt_viewer)
+    rec['wait_middle'] = _middle(later).tolist()
+    rec['wait_ok'] = bool(
+        np.abs(expected.astype(int) - _middle(later).astype(int)).max() <= 1
+    )
+    _diag_write(rec)
+
+    if _diag_state['saved'] < 30:
+        _diag_state['saved'] += 1
+        out = os.path.join(
+            os.path.dirname(_DIAG_PATH),
+            f'mismatch_{os.getpid()}_{_diag_state["saved"]}.npz',
+        )
+        np.savez_compressed(out, first=shot, now=now, wait=later)
+
+
 def _update_data(
     layer: Labels,
     label: int,
@@ -898,10 +1127,28 @@ def _update_data(
 
     qtbot.wait(50)  # wait for .update() to be called on QtColorBox from Qt
 
-    color_box_color = qt_viewer.controls.widgets[
-        layer
-    ]._label_control.colorbox.color
-    screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
+    if _DIAG_NO_CONTROLS:
+        sel = layer._selected_color
+        color_box_color = (
+            None if sel is None else tuple(np.round(255 * sel).astype(int))
+        )
+    else:
+        color_box_color = qt_viewer.controls.widgets[
+            layer
+        ]._label_control.colorbox.color
+    if _DIAG_PATH:
+        screenshot, n_draws = _diag_grab(qt_viewer)
+        _diag_record(
+            layer,
+            label,
+            qtbot,
+            qt_viewer,
+            color_box_color,
+            screenshot,
+            n_draws,
+        )
+    else:
+        screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
     shape = np.array(screenshot.shape[:2])
     middle_pixel = screenshot[tuple(shape // 2)]
 
@@ -910,7 +1157,15 @@ def _update_data(
 
 @pytest.fixture
 def qt_viewer_with_controls(qt_viewer: QtViewer) -> QtViewer:
-    qt_viewer.controls.show()
+    if _DIAG_PATH:
+        qt_viewer.viewer.canvas.background_color_override = (
+            0.2,
+            0.2,
+            0.2,
+            1.0,
+        )
+    if not _DIAG_NO_CONTROLS:
+        qt_viewer.controls.show()
     return qt_viewer
 
 
@@ -998,7 +1253,10 @@ def test_label_colors_matching_widget_direct(
     color_box_color, middle_pixel = _update_data(
         layer, 0, qtbot, qt_viewer_with_controls, dtype
     )
-    assert np.allclose([0, 0, 0, 255], middle_pixel)
+    if _DIAG_PATH:
+        assert np.allclose(_DIAG_BG, middle_pixel, atol=1)
+    else:
+        assert np.allclose([0, 0, 0, 255], middle_pixel)
 
     for label in test_colors:
         # Change color & selected color to the same label

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import os
 import warnings
 from functools import partial
 from itertools import zip_longest
@@ -195,6 +196,16 @@ class VispyCanvas:
         self._scene_canvas = NapariSceneCanvas(
             *args, keys=None, vsync=True, **kwargs
         )
+        if os.environ.get('NAPARI_DIAG_NATIVE_CANVAS') == '1':
+            # DIAGNOSTIC (macos-26): a native child is excluded from its
+            # top-level's RHI decision, so the window flushes as raster
+            from qtpy.QtCore import Qt
+
+            native = self._scene_canvas.native
+            native.setAttribute(
+                Qt.WidgetAttribute.WA_DontCreateNativeAncestors
+            )
+            native.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
 
         self.view: ViewBox = self.central_widget.add_view(border_width=0)
         self.view.order = 100  # ensure it's always drawn on top
