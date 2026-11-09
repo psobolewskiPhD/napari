@@ -18,6 +18,13 @@ from napari._app_model.actions._view import (
 from napari._tests.utils import skip_local_focus, skip_local_popups
 from napari.viewer import ViewerModel
 
+# Qt >= 6.12 on macOS < 26 asks every QMainWindow resize for a titlebar effect
+# view, which an OpenGL-surface window like napari's can't host; Qt warns and
+# skips it, with nothing visible lost.
+ignore_titlebar_effect_warning = pytest.mark.qt_log_ignore(
+    'Can not manage visual effect areas'
+)
+
 
 def check_fullscreen(viewer, qtbot, *, expected: bool):
     """Wait until the window reaches `expected` fullscreen state.
@@ -109,6 +116,7 @@ def test_toggle_axes_scale_bar_coordinate_grid_attr(
 
 
 @skip_local_popups
+@ignore_titlebar_effect_warning
 @pytest.mark.qt_log_level_fail('WARNING')
 def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
     """
@@ -146,6 +154,7 @@ def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
 
 
 @skip_local_popups
+@ignore_titlebar_effect_warning
 @pytest.mark.qt_log_level_fail('WARNING')
 def test_toggle_fullscreen_from_maximized(make_napari_viewer, qtbot):
     """
