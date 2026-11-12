@@ -247,13 +247,17 @@ def test_grid_mode(make_napari_viewer, qtbot):
     screenshot = None
     center = None
 
+    # The poll's predicate must be the same one asserted below. A poll that
+    # accepts a nearly-right frame returns on it, and the stricter assertion
+    # then fails on exactly that frame - worse than not polling at all.
+    # `assert_almost_equal` on uint8 pixels means exact, so demand exact here.
     def _screenshot_matches_last_layer():
         nonlocal screenshot, center
         screenshot = viewer.screenshot(canvas_only=True, flash=False)
         center = tuple(
             np.round(np.divide(screenshot.shape[:2], 2)).astype(int)
         )
-        return np.allclose(screenshot[center], color[-1], atol=1)
+        return np.array_equal(screenshot[center], color[-1])
 
     with suppress(QtBotTimeoutError):
         qtbot.waitUntil(_screenshot_matches_last_layer, timeout=4000)
@@ -275,11 +279,12 @@ def test_grid_mode(make_napari_viewer, qtbot):
         (3 / 4, 5 / 6),
     ]
 
+    # Exact, for the same reason as above: the loop below asserts exact.
     def _grid_screenshot_matches():
         nonlocal screenshot
         screenshot = viewer.screenshot(canvas_only=True, flash=False)
         return all(
-            np.allclose(
+            np.array_equal(
                 screenshot[
                     tuple(
                         np.round(np.multiply(screenshot.shape[:2], p)).astype(
@@ -288,7 +293,6 @@ def test_grid_mode(make_napari_viewer, qtbot):
                     )
                 ],
                 c,
-                atol=1,
             )
             for c, p in zip(color, pos, strict=False)
         )
