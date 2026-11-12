@@ -6,10 +6,8 @@ import zarr
 
 from napari.layers import Image
 
-data_dask = da.random.random(
-    size=(100_000, 1000, 1000), chunks=(1, 1000, 1000)
-)
-data_zarr = zarr.zeros((100_000, 1000, 1000))
+data_dask = da.zeros((100_000, 1000, 1000), chunks=(1, 1000, 1000))
+data_zarr = zarr.zeros((100_000, 1000, 1000), chunks=(1, 1000, 1000))
 
 
 @pytest.mark.parametrize(

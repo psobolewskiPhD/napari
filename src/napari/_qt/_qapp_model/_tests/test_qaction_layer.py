@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import numpy as np
 import numpy.testing as npt
 import pytest
+from qtpy.QtCore import QMimeData
 from qtpy.QtWidgets import QApplication
 
 from napari._qt._qapp_model.qactions._layerlist_context import (
@@ -20,6 +21,53 @@ from napari.components import LayerList
 from napari.layers.base._test_util_sample_layer import SampleLayer
 from napari.utils.transforms import Affine
 from napari.utils.transforms._units import get_units_from_name
+
+
+@pytest.fixture(autouse=True)
+def _private_clipboard(monkeypatch):
+    """Give this module a clipboard no other process can touch.
+
+    Every test here round-trips through the clipboard: put text (or a layer's
+    spatial data) in, then have the production code read it back. But the
+    clipboard is a single resource shared by every process on the display, so
+    under pytest-xdist a concurrently running worker can take ownership between
+    the write and the read. `test_paste_rotate_higher_dim` failed exactly that
+    way on macOS CI - the paste found somebody else's clipboard contents, so
+    `rotate` stayed at the identity matrix:
+
+        Mismatch at indices: [0, 0]: 1.0 (ACTUAL), 0 (DESIRED)
+
+    None of these tests is checking Qt's clipboard integration; they check what
+    napari does with the data in it. So keep the data in-process, where no other
+    worker can reach it. A real `QMimeData` is used for storage so the
+    `setText` -> `mimeData().text()` round trip behaves as it does for real.
+
+    A plain class rather than a Mock: patching a method of a QObject subclass
+    with a Mock upsets PySide6's metaobject introspection.
+    """
+
+    class _LocalClipboard:
+        def __init__(self):
+            self._mime = QMimeData()
+
+        def mimeData(self, *_):
+            return self._mime
+
+        def setMimeData(self, mime_data, *_):
+            self._mime = mime_data
+
+        def text(self, *_):
+            return self._mime.text()
+
+        def setText(self, text, *_):
+            self._mime = QMimeData()
+            self._mime.setText(text)
+
+        def clear(self, *_):
+            self._mime = QMimeData()
+
+    clipboard = _LocalClipboard()
+    monkeypatch.setattr(QApplication, 'clipboard', lambda *_: clipboard)
 
 
 @pytest.fixture

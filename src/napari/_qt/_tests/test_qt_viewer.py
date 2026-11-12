@@ -812,6 +812,28 @@ def test_create_non_empty_viewer_model(qtbot: QtBot, grid: bool) -> None:
     gc.collect()
 
 
+@pytest.mark.allow_animation_thread
+def test_close_joins_dims_animation_thread(
+    qtbot: QtBot, qt_viewer: QtViewer
+) -> None:
+    """The real viewer teardown path must join its child animation thread."""
+    qt_viewer.viewer.dims.ndim = 3
+    qt_viewer.viewer.dims.set_range(0, (0, 10, 1))
+    qt_viewer.dims.play(0, fps=20)
+    qtbot.waitUntil(qt_viewer.dims._animation_thread.isRunning)
+    thread = qt_viewer.dims._animation_thread
+
+    # Exercise QtViewer's teardown boundary without deleting fixture-owned
+    # widgets that pytest-qt still needs to close during fixture teardown.
+    with (
+        mock.patch.object(qt_viewer.canvas, 'delete'),
+        mock.patch.object(qt_viewer.dockConsole, 'deleteLater'),
+    ):
+        qt_viewer.closeEvent(None)
+
+    assert not thread.isRunning()
+
+
 def test_qt_viewer_canvas_is_nested_in_main_widget(
     qt_viewer: QtViewer,
 ) -> None:
@@ -888,6 +910,7 @@ def test_create_non_empty_viewer_model_initializes_world_units(
 def _update_data(
     layer: Labels,
     label: int,
+    qtbot: QtBot,
     qt_viewer: QtViewer,
     colorbox_painted_colors: list[tuple[int, ...]],
     dtype: np.dtype = np.uint64,
@@ -897,12 +920,18 @@ def _update_data(
     ``colorbox_painted_colors`` comes from the fixture of the same name and is
     updated on each QtColorBox paintEvent.
     """
+    previous_label = layer.selected_label
     layer.data = np.full((2, 2), label, dtype=dtype)
     layer.selected_label = label
+    painted = len(colorbox_painted_colors)
 
-    # QtColorBox only requests a repaint with update(). Run the event loop so
-    # that colorbox_painted_colors holds the color which it really painted.
-    QApplication.processEvents()
+    # QtColorBox only requests a repaint with update(), and Qt 6 delivers it
+    # on the next frame tick, so one processEvents() can run before it.
+    # Wait for the repaint itself. An unchanged label requests none, so then
+    # wait only for the first paint after the window was exposed.
+    if layer.selected_label != previous_label:
+        painted += 1
+    qtbot.waitUntil(lambda: len(colorbox_painted_colors) >= max(painted, 1))
 
     color_box_color = colorbox_painted_colors[-1]
     screenshot = qt_viewer.screenshot(flash=False, size=[400, 400])
@@ -928,6 +957,7 @@ def qt_viewer_with_controls(qtbot: QtBot, qt_viewer: QtViewer) -> QtViewer:
 @pytest.mark.parametrize('dtype', [np.int8, np.int16, np.int64])
 @pytest.mark.show_qt_viewer
 def test_label_colors_matching_widget_auto(
+    qtbot: QtBot,
     qt_viewer_with_controls: QtViewer,
     colorbox_painted_colors: list[tuple[int, ...]],
     use_selection: bool,
@@ -958,6 +988,7 @@ def test_label_colors_matching_widget_auto(
         color_box_color, middle_pixel = _update_data(
             layer,
             label,
+            qtbot,
             qt_viewer_with_controls,
             colorbox_painted_colors,
             dtype,
@@ -977,6 +1008,7 @@ def test_label_colors_matching_widget_auto(
 @pytest.mark.parametrize('dtype', [np.uint64, np.uint16, np.uint8, np.int16])
 @pytest.mark.show_qt_viewer
 def test_label_colors_matching_widget_direct(
+    qtbot: QtBot,
     qt_viewer_with_controls: QtViewer,
     colorbox_painted_colors: list[tuple[int, ...]],
     use_selection: bool,
@@ -1006,7 +1038,12 @@ def test_label_colors_matching_widget_direct(
     layer.show_selected_label = use_selection
 
     color_box_color, middle_pixel = _update_data(
-        layer, 0, qt_viewer_with_controls, colorbox_painted_colors, dtype
+        layer,
+        0,
+        qtbot,
+        qt_viewer_with_controls,
+        colorbox_painted_colors,
+        dtype,
     )
     assert np.allclose([0, 0, 0, 255], middle_pixel)
 
@@ -1015,6 +1052,7 @@ def test_label_colors_matching_widget_direct(
         color_box_color, middle_pixel = _update_data(
             layer,
             label,
+            qtbot,
             qt_viewer_with_controls,
             colorbox_painted_colors,
             dtype,

@@ -10,8 +10,49 @@ from napari._wayland_fix import _fix_wayland_opengl
 WAYLAND_ENV = {'WAYLAND_DISPLAY': 'wayland-0', 'DISPLAY': ':0'}
 
 
+#: Every env var this module either sets up or expects `_fix_wayland_opengl`
+#: to write. Restored wholesale after each test, because `monkeypatch` cannot
+#: do it: `delenv(name, raising=False)` records **no undo entry at all** when
+#: the variable is already absent (see `MonkeyPatch.delitem`), so a value the
+#: code under test then sets survives the test.
+#:
+#: That is not a theoretical tidiness point. `_fix_wayland_opengl` does
+#: `os.environ.setdefault('PYOPENGL_PLATFORM', 'glx')`, and a leaked
+#: `PYOPENGL_PLATFORM=glx` breaks every subprocess the worker spawns
+#: afterwards on macOS: PyOpenGL's `_load()` honours that variable over
+#: `sys.platform`, selects the GLX plugin, and dies at import with
+#: `AttributeError: dlsym(..., glXGetCurrentContext): symbol not found`.
+#: That is how `test_trace_on_start` failed on both macOS jobs while the
+#: parent process was fine - the parent had imported PyOpenGL long before.
+_MANAGED_ENV = (
+    'WAYLAND_DISPLAY',
+    'XDG_SESSION_TYPE',
+    'DISPLAY',
+    'QT_QPA_PLATFORM',
+    'PYOPENGL_PLATFORM',
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_managed_env():
+    """Put `_MANAGED_ENV` back exactly as it was, whatever the test did."""
+    saved = {key: os.environ.get(key) for key in _MANAGED_ENV}
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _apply_env(monkeypatch, env):
-    """Set exactly the given env vars, clearing the ones we care about first."""
+    """Set exactly the given env vars, clearing the ones we care about first.
+
+    Clearing is still done through `monkeypatch` so the intent reads locally;
+    the restoration that actually holds is `_restore_managed_env` above.
+    """
     managed = {'WAYLAND_DISPLAY', 'XDG_SESSION_TYPE', 'DISPLAY'}
     for key in managed - env.keys():
         monkeypatch.delenv(key, raising=False)  # clear vars not explicitly set

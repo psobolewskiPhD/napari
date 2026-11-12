@@ -1,3 +1,5 @@
+import io
+import urllib.request
 from typing import TYPE_CHECKING
 
 import imageio.v3 as iio
@@ -58,17 +60,35 @@ def test_animated_gif_reader(save_image):
     assert layer_data[0][0].shape == (5, 20, 20, 3)
 
 
-@pytest.mark.slow
-def test_reader_plugin_url():
-    layer_data = npe2.read(
-        [
-            'https://github.com/napari/docs/raw/main/docs/_static/images/nf-logo.png'
-        ],
-        stack=False,
-    )
-    assert isinstance(layer_data, list)
+def test_reader_plugin_url(monkeypatch):
+    """The builtin reader hands a URL to imageio instead of the filesystem.
+
+    Deliberately does not touch the network. What is napari's to get right here
+    is recognising the URL and passing it through untouched - `abspath_or_url`
+    is documented to leave http/ftp/file URLs alone - and that is checkable
+    offline. Whether a third-party host is up is not a fact about napari, and
+    this test used to fail on it (`Connection reset by peer` from github.com).
+
+    The host is a reserved `.invalid` name on purpose: if the patch below ever
+    stops intercepting, DNS fails loudly rather than the test quietly passing
+    without exercising anything.
+    """
+    image = (np.random.rand(16, 24, 3) * 255).astype(np.uint8)
+    png = iio.imwrite('<bytes>', image, extension='.png')
+    url = 'https://example.invalid/logo.png'
+    requested = []
+
+    def fake_urlopen(uri, *args, **kwargs):
+        requested.append(uri)
+        return io.BytesIO(png)
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+
+    layer_data = npe2.read([url], stack=False)
+
+    assert requested == [url]
     assert len(layer_data) == 1
-    assert isinstance(layer_data[0], tuple)
+    np.testing.assert_array_equal(layer_data[0][0], image)
 
 
 def test_reader_plugin_csv(tmp_path):

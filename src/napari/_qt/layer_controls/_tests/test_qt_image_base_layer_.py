@@ -150,7 +150,7 @@ def test_clim_slider_step_size_and_precision(qtbot, mag):
 
 
 def test_qt_image_controls_change_contrast(qtbot):
-    layer = Image(np.random.rand(8, 8))
+    layer = Image(np.linspace(0, 1, 64).reshape(8, 8))
     qtctrl = QtBaseImageControls(layer)
     qtbot.addWidget(qtctrl)
     qtctrl._contrast_limits_control.contrast_limits_slider.setValue((0.1, 0.8))

@@ -18,6 +18,12 @@ from napari.settings import get_settings
 from napari.utils._tests.test_naming import eval_with_filename
 from napari.utils.action_manager import action_manager
 
+# These tests read canvas pixels, so they need the window manager to have
+# finished resizing the canvas before the first capture - see
+# `_wait_for_canvas_settled`. Module-scoped because the cost is per shown
+# viewer, and every test here that shows one also samples it.
+pytestmark = pytest.mark.settle_canvas
+
 
 def _get_provider_actions(type_):
     actions = set()
@@ -28,7 +34,19 @@ def _get_provider_actions(type_):
                 superclass
             ).values()
         )
-    return actions
+    # Sort for deterministic parametrize IDs: this feeds
+    # @pytest.mark.parametrize below, and a set of functions iterates in
+    # id()-dependent (process-dependent) order, which desyncs collection
+    # across pytest-xdist worker processes.
+    #
+    # The key has to be fully qualifying, not just `__name__`: two providers
+    # can contribute commands of the same name, `sorted` leaves ties in the
+    # set's own order, and pytest then disambiguates the duplicate IDs by
+    # appending indices in that same order - so a `__name__`-only key would
+    # leave exactly the desync it is meant to remove.
+    return sorted(
+        actions, key=lambda action: (action.__module__, action.__qualname__)
+    )
 
 
 def _assert_shortcuts_exist_for_each_action(type_):

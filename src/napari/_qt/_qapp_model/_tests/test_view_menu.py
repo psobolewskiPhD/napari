@@ -5,8 +5,6 @@ import sys
 
 import numpy as np
 import pytest
-from packaging.version import parse as parse_version
-from qtpy import QT_VERSION
 from qtpy.QtCore import QEvent, QPoint, QPointF, Qt
 from qtpy.QtGui import QMouseEvent
 from qtpy.QtWidgets import QApplication
@@ -19,6 +17,31 @@ from napari._app_model.actions._view import (
 )
 from napari._tests.utils import skip_local_focus, skip_local_popups
 from napari.viewer import ViewerModel
+
+# Qt >= 6.12 on macOS < 26 asks every QMainWindow resize for a titlebar effect
+# view, which an OpenGL-surface window like napari's can't host; Qt warns and
+# skips it, with nothing visible lost.
+ignore_titlebar_effect_warning = pytest.mark.qt_log_ignore(
+    'Can not manage visual effect areas'
+)
+
+
+def check_fullscreen(viewer, qtbot, *, expected: bool):
+    """Wait until the window reaches `expected` fullscreen state.
+
+    Toggling fullscreen is not synchronous - on macOS in particular there is an
+    animation to get through - so this has to wait rather than assert
+    immediately. The assertion deliberately lives *inside* the callback:
+    pytest-qt chains it as the cause of its own TimeoutError, so a failure
+    reports `assert False` against the real state. Passing a lambda instead
+    would report only 'waitUntil timed out', which says nothing about what was
+    being waited for - see the note in `QtBot.waitUntil`'s own docstring.
+    """
+
+    def _reached_expected_state():
+        assert viewer.window._qt_window.isFullScreen() is expected
+
+    qtbot.waitUntil(_reached_expected_state)
 
 
 def check_windows_style(viewer):
@@ -93,14 +116,7 @@ def test_toggle_axes_scale_bar_coordinate_grid_attr(
 
 
 @skip_local_popups
-@pytest.mark.skipif(
-    parse_version(QT_VERSION) >= parse_version('6.9.0')
-    and sys.platform == 'win32',
-    reason='bug in Qt with maximized windows, https://bugreports.qt.io/browse/QTBUG-135844',
-)
-@pytest.mark.flaky(
-    reruns=2, reruns_delay=250, condition=sys.platform == 'darwin'
-)  # sometimes fails on macos CI
+@ignore_titlebar_effect_warning
 @pytest.mark.qt_log_level_fail('WARNING')
 def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
     """
@@ -122,10 +138,7 @@ def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
 
     # Check fullscreen state change
     app.commands.execute_command(action_id)
-    if sys.platform == 'darwin':
-        # On macOS, wait for the animation to complete
-        qtbot.wait(250)
-    assert viewer.window._qt_window.isFullScreen()
+    check_fullscreen(viewer, qtbot, expected=True)
     check_windows_style(viewer)
 
     # Check `View` menu can be seen in fullscreen window state
@@ -133,10 +146,7 @@ def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
 
     # Check return to non fullscreen state
     app.commands.execute_command(action_id)
-    if sys.platform == 'darwin':
-        # On macOS, wait for the animation to complete
-        qtbot.wait(250)
-    assert not viewer.window._qt_window.isFullScreen()
+    check_fullscreen(viewer, qtbot, expected=False)
     check_windows_style(viewer)
 
     # Check `View` still menu can be seen in non fullscreen window state
@@ -144,13 +154,7 @@ def test_toggle_fullscreen_from_normal(make_napari_viewer, qtbot):
 
 
 @skip_local_popups
-@pytest.mark.flaky(
-    reruns=2, reruns_delay=250, condition=sys.platform == 'darwin'
-)  # sometimes fails on macos CI
-@pytest.mark.skipif(
-    parse_version(QT_VERSION) >= parse_version('6.9.0'),
-    reason='bug in Qt with maximized windows, https://bugreports.qt.io/browse/QTBUG-135844',
-)
+@ignore_titlebar_effect_warning
 @pytest.mark.qt_log_level_fail('WARNING')
 def test_toggle_fullscreen_from_maximized(make_napari_viewer, qtbot):
     """
@@ -173,10 +177,7 @@ def test_toggle_fullscreen_from_maximized(make_napari_viewer, qtbot):
 
     # Check fullscreen state change
     app.commands.execute_command(action_id)
-    if sys.platform == 'darwin':
-        # On macOS, wait for the animation to complete
-        qtbot.wait(250)
-    assert viewer.window._qt_window.isFullScreen()
+    check_fullscreen(viewer, qtbot, expected=True)
     check_windows_style(viewer)
 
     # Check `View` menu can be seen in fullscreen window state coming from maximized state
@@ -184,14 +185,7 @@ def test_toggle_fullscreen_from_maximized(make_napari_viewer, qtbot):
 
     # Check return to non fullscreen state
     app.commands.execute_command(action_id)
-    if sys.platform == 'darwin':
-        # On macOS, wait for the animation to complete
-        qtbot.wait(250)
-
-    def check_not_fullscreen():
-        assert not viewer.window._qt_window.isFullScreen()
-
-    qtbot.waitUntil(check_not_fullscreen)
+    check_fullscreen(viewer, qtbot, expected=False)
     check_windows_style(viewer)
 
     # Check `View` still menu can be seen in non fullscreen window state
