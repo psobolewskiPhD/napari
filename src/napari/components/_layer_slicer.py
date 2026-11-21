@@ -203,7 +203,7 @@ class _LayerSlicer:
             dims,
             force,
         )
-        if existing_task := self._find_existing_task(layers):
+        for existing_task in self._find_existing_tasks(layers):
             logger.debug('Cancelling task %s', id(existing_task))
             existing_task.cancel()
 
@@ -271,7 +271,8 @@ class _LayerSlicer:
     def _slice_layers(self, requests: dict) -> dict:
         """
         Iterates through a dictionary of request objects and call the slice
-        on each individual layer. Can be called from the main or slicing thread.
+        on each individual layer. Skips any layers that have a newer request.
+        Can be called from the main or slicing thread.
 
         Attributes
         ----------
@@ -283,7 +284,15 @@ class _LayerSlicer:
         dict[Layer, SliceResponse]: which contains the results of the slice
         """
         logger.debug('_LayerSlicer._slice_layers: %s', requests)
-        result = {layer: request() for layer, request in requests.items()}
+        result = {}
+        for weak_layer, request in requests.items():
+            layer = weak_layer()
+            if (
+                layer is None
+                or layer._slicing_state._last_slice_id != request.id
+            ):
+                continue
+            result[weak_layer] = request()
         self.events.ready(value=result)
         return result
 
@@ -335,21 +344,18 @@ class _LayerSlicer:
                     return True
         return False
 
-    def _find_existing_task(
+    def _find_existing_tasks(
         self, layers: Iterable[Layer]
-    ) -> Future[dict] | None:
-        """Find the task associated with a list of layers. Returns the first
-        task found for which the layers of the task are a subset of the input
-        layers.
+    ) -> list[Future[dict]]:
+        """Find the tasks whose layers are a subset of the input layers.
 
         This function provides a lock to ensure that the layers_to_task dict
         is unmodified during this process.
         """
         with self._lock_futures_dicts:
             layer_set = set(layers)
-            for weak_task_layers, task in self._layers_to_task.items():
-                task_layers = {w() for w in weak_task_layers} - {None}
-                if task_layers.issubset(layer_set):
-                    logger.debug('Found existing task for %s', task_layers)
-                    return task
-        return None
+            return [
+                task
+                for weak_task_layers, task in self._layers_to_task.items()
+                if {w() for w in weak_task_layers} - {None} <= layer_set
+            ]
