@@ -191,6 +191,24 @@ def test_submit_multiple_calls_cancels_pending(layer_slicer):
     assert pending.cancelled()
 
 
+def test_submit_cancels_all_superseded_pending(layer_slicer):
+    dims = Dims()
+    layer1 = FakeAsyncLayer()
+    layer2 = FakeAsyncLayer()
+    layer3 = FakeAsyncLayer()
+
+    with layer1.lock:
+        blocked = layer_slicer.submit(layers=[layer1], dims=dims)
+        _wait_until_running(blocked)
+        pending = [
+            layer_slicer.submit(layers=[layer], dims=dims)
+            for layer in (layer2, layer3)
+        ]
+        layer_slicer.submit(layers=[layer1, layer2, layer3], dims=dims)
+
+    assert all(task.cancelled() for task in pending)
+
+
 def test_submit_mixed_allows_sync_to_run(layer_slicer):
     """ensure that a blocked async slice doesn't block sync slicing"""
     dims = Dims()
@@ -247,6 +265,19 @@ def test_submit_task_to_layers_lock(layer_slicer):
 
     assert _wait_for_response(task)[layer].id == 1
     assert task not in layer_slicer._layers_to_task
+
+
+def test_running_task_skips_resubmitted_layers(layer_slicer):
+    dims = Dims()
+    layer1, layer2 = FakeAsyncLayer(), FakeAsyncLayer()
+
+    with layer1.lock:
+        running = layer_slicer.submit(layers=[layer1, layer2], dims=dims)
+        _wait_until_running(running)
+        newer = layer_slicer.submit(layers=[layer2], dims=dims)
+
+    assert list(_wait_for_response(running)) == [layer1]
+    assert list(_wait_for_response(newer)) == [layer2]
 
 
 def test_submit_exception_main_thread(layer_slicer):
